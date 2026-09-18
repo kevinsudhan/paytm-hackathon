@@ -40,11 +40,23 @@ const SECRET = process.env.SHIPMATE_API_SECRET ?? "";
 const PORT = Number(process.env.PORT ?? 8788);
 
 if (!SECRET) {
+  // Two different places depending on where this is running, and saying only "put it in
+  // .env" sends someone hunting for a file that does not exist on the host. The hosted
+  // case is named first because that is where a cold deploy hits this.
+  const hosted = Boolean(process.env.RENDER || process.env.PORT && process.env.NODE_ENV === "production");
   console.error(
     "\nSHIPMATE_API_SECRET is not set.\n\n" +
-    "This service will not start without it. Generate one and put it in .env:\n" +
+    "This service will not start without it.\n\n" +
+    (hosted
+      ? "You are running on a host, so set it as an environment variable in the\n" +
+        "dashboard (Render: your service -> Environment -> Add Environment Variable),\n" +
+        "not in a .env file — there is no .env in the image.\n\n" +
+        "Use the SAME value your local .env already has, so the n8n credential keeps\n" +
+        "working. Only generate a new one if you are starting fresh:\n"
+      : "Put it in araxys-shipmate/.env:\n") +
     "  node -e \"console.log(require('crypto').randomBytes(32).toString('hex'))\"\n\n" +
-    "The same value goes in the n8n credential that calls this API.\n",
+    "Whatever the value, the n8n 'shipmate-secret' credential must send the same one\n" +
+    "in the x-shipmate-secret header, or every workflow call will get a 401.\n",
   );
   process.exit(1);
 }
