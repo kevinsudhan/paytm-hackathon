@@ -12,8 +12,9 @@
  * made by something that had time to think.
  */
 
-import { GoogleGenAI } from "@google/genai";
+import Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
+import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
 import {
   createCommitment, type Commitment, type Dependency, type Owner,
 } from "../domain/commitment.js";
@@ -21,29 +22,7 @@ import { createTwin, type StateName, type Twin } from "../domain/twin.js";
 import { putCommitment, putTwin, getTwin } from "./store.js";
 import { remember, type MemoryItem } from "../memory/cognee.js";
 
-/**
- * Gemini, matching the voice stack. Priya and Arun already run on Google
- * (`gemini-3.1-flash-live-preview`), so extraction staying on the same provider means one
- * key to rotate rather than two.
- *
- * The model is env-overridable because Gemini's ids move faster than this code will.
- * `npm run models` lists what the key can actually reach — a wrong id fails as a 404 at
- * request time, and that is a one-line env fix rather than a redeploy.
- */
-const MODEL = process.env.GEMINI_MODEL ?? "gemini-3-flash-preview";
-
-let client: GoogleGenAI | null = null;
-function gemini(): GoogleGenAI {
-  // Constructed lazily so the service still boots without a key. Extraction is the only
-  // thing that needs one, and refusing to start over it would take the whole commitment
-  // engine down with it.
-  if (!client) {
-    const apiKey = process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY;
-    if (!apiKey) throw new Error("GEMINI_API_KEY is not set — call extraction cannot run");
-    client = new GoogleGenAI({ apiKey });
-  }
-  return client;
-}
+const client = new Anthropic(); // resolves ANTHROPIC_API_KEY / auth profile
 
 /**
  * Repairs the run-together words the Sarvam ASR produces ("thisis Priyafromthe").
@@ -150,27 +129,25 @@ export async function intake(payload: CallPayload): Promise<IntakeResult> {
   }
 
   const callTime = payload.createdAt ?? new Date().toISOString();
-  const response = await gemini().models.generateContent({
-    model: MODEL,
-    contents:
-      `Call ${payload.callId} with ${payload.agentName ?? `agent ${payload.agentId}`}, ` +
-      `placed at ${callTime} (UTC). The caller's number is ${payload.fromNumber ?? "unknown"}. ` +
-      `The caller is in India, so "tonight" and "tomorrow morning" are IST, UTC+5:30.\n\n` +
-      `Transcript:\n${transcript}`,
-    config: {
-      systemInstruction: SYSTEM,
-      responseMimeType: "application/json",
-      // Derived from the zod schema rather than written twice. Two copies of a schema
-      // drift, and the one that drifts is always the one nothing validates against.
-      responseJsonSchema: z.toJSONSchema(ExtractionSchema),
-      temperature: 0.1, // extraction, not composition
-    },
+  const response = await client.messages.parse({
+    model: "claude-opus-5",
+    max_tokens: 8000,
+    system: SYSTEM,
+    // Extraction is a reading task, not a reasoning one. Medium effort is where this
+    // stops getting better, and every call on the desk runs through here.
+    output_config: { effort: "medium", format: zodOutputFormat(ExtractionSchema) },
+    thinking: { type: "adaptive" },
+    messages: [{
+      role: "user",
+      content:
+        `Call ${payload.callId} with ${payload.agentName ?? `agent ${payload.agentId}`}, ` +
+        `placed at ${callTime} (UTC). The caller's number is ${payload.fromNumber ?? "unknown"}. ` +
+        `The caller is in India, so "tonight" and "tomorrow morning" are IST, UTC+5:30.\n\n` +
+        `Transcript:\n${transcript}`,
+    }],
   });
 
-  // responseMimeType constrains the shape but does not guarantee it, so the result is
-  // still parsed and validated. A malformed extraction is skipped rather than allowed to
-  // half-populate the CRM with fields that happened to survive.
-  const extraction = parseExtraction(response.text);
+  const extraction = response.parsed_output;
   if (!extraction) {
     return {
       callId: payload.callId, extraction: null, commitments: [], twin: null,
@@ -206,27 +183,6 @@ export async function intake(payload: CallPayload): Promise<IntakeResult> {
   const remembered = await rememberCall(payload, extraction, customer, shipmentRef);
 
   return { callId: payload.callId, extraction, commitments, twin, remembered };
-}
-
-/**
- * Parses and validates the model's JSON. Returns null rather than throwing: a bad
- * extraction should skip one call, not fail the webhook and make SnapServe retry it.
- */
-function parseExtraction(text: string | undefined): Extraction | null {
-  if (!text) return null;
-  let raw: unknown;
-  try {
-    raw = JSON.parse(text);
-  } catch {
-    console.warn("[intake] model returned non-JSON despite responseMimeType");
-    return null;
-  }
-  const parsed = ExtractionSchema.safeParse(raw);
-  if (!parsed.success) {
-    console.warn(`[intake] extraction failed validation: ${parsed.error.issues.map((i) => i.path.join(".")).join(", ")}`);
-    return null;
-  }
-  return parsed.data;
 }
 
 function toOwner(party: z.infer<typeof PartySchema>): Owner {

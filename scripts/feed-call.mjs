@@ -2,8 +2,9 @@
  * Replays a real SnapServe call through SHIPMATE's extraction path.
  *
  * This is how you close out the one unproven piece. The whole intake path is built and
- * typechecked, but it has never turned a real transcript into a commitment, because no
- * live model key has been available. Put GEMINI_API_KEY in .env and run this.
+ * typechecked, but it has never turned a real transcript into a commitment, because the
+ * ANTHROPIC_API_KEY in araxys-crm/snapserve-setup/.env is revoked (verified 18 Sep 2026 —
+ * it returns 401 authentication_error). Put a live key in .env and run this.
  *
  *   node scripts/feed-call.mjs            # the most recent completed call on 717 or 758
  *   node scripts/feed-call.mjs 24374      # a specific call id
@@ -89,13 +90,11 @@ async function main() {
     console.error(`HTTP ${r.status}`);
     console.error(JSON.stringify(out, null, 2));
     const err = String(out.error ?? "");
-    // The three ways this fails in practice, each with a different fix.
-    if (err.includes("GEMINI_API_KEY is not set")) {
-      console.error("\nGEMINI_API_KEY is empty in .env. Extraction is the only thing that needs it.\n");
-    } else if (err.includes("API key not valid") || err.includes("API_KEY_INVALID")) {
-      console.error("\nThat Gemini key is not valid, or the Gemini API is not enabled for it.\n");
-    } else if (err.includes("404") || err.includes("NOT_FOUND")) {
-      console.error("\nThat model id does not exist for this key. Run `npm run models` and set GEMINI_MODEL.\n");
+    // Two shapes of the same problem: no key at all, or the revoked one still in place.
+    if (err.includes("authentication_error")) {
+      console.error("\nThat Anthropic key is revoked. Put a live one in .env and re-run.\n");
+    } else if (err.includes("Could not resolve authentication method")) {
+      console.error("\nANTHROPIC_API_KEY is empty in .env. Extraction is the only thing that needs it.\n");
     }
     process.exit(1);
   }

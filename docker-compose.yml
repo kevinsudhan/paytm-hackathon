@@ -17,11 +17,12 @@ services:
     ports:
       - "8000:8000"
     environment:
-      # Cognee needs an LLM for entity extraction and graph building. Same key and
-      # provider SHIPMATE uses for call extraction, so there is one key to rotate.
-      LLM_PROVIDER: gemini
-      LLM_MODEL: gemini-3-flash-preview
-      LLM_API_KEY: ${GEMINI_API_KEY}
+      # Cognee needs an LLM for entity extraction and graph building. Same key SHIPMATE
+      # uses for call extraction — the one in araxys-crm/snapserve-setup/.env is revoked,
+      # so put a live one in .env before starting this.
+      LLM_PROVIDER: anthropic
+      LLM_MODEL: claude-opus-5
+      LLM_API_KEY: ${ANTHROPIC_API_KEY}
       # Local file-backed stores. Fine for the hackathon; swap for Postgres + a real
       # vector store when this outlives the demo.
       VECTOR_DB_PROVIDER: lancedb

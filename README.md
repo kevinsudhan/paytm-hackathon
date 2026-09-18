@@ -76,7 +76,7 @@ Nothing else changes — a memory outage must never block a customs filing.
 ### Tests
 
 ```bash
-npm test     # 88 checks: commitment engine, twin, policy gate, workflows, substitution
+npm test     # 48 checks over the commitment engine, the twin and the policy gate
 ```
 
 No network, no API key, no database.
@@ -96,7 +96,7 @@ That third arrow is the one people miss. n8n Cloud runs on the internet; a SHIPM
 `localhost:8788` is invisible to it.
 
 **1. Put SHIPMATE somewhere with a hostname.** `render.yaml` and `Dockerfile` are here for
-it — Blueprint deploy, then set `SHIPMATE_API_SECRET` and `GEMINI_API_KEY` in the
+it — Blueprint deploy, then set `SHIPMATE_API_SECRET` and `ANTHROPIC_API_KEY` in the
 dashboard. Railway and Fly work the same way.
 
 Do **not** reach for a tunnel. Agents 717, 758 and 1182 have each been wired to a
@@ -172,10 +172,9 @@ localhost URLs outright.
 **Wired but unproven:**
 
 - **Call extraction.** The path is built and typechecked but has never produced a
-  commitment from a real transcript, because no live model key has been available. It runs
-  on Gemini, the same provider the voice agents use, so there is one key to rotate rather
-  than two. Set `GEMINI_API_KEY`, run `npm run models` to confirm `GEMINI_MODEL` is a real
-  id, then `node scripts/feed-call.mjs` to close this out.
+  commitment from a real transcript, because the `ANTHROPIC_API_KEY` in
+  `araxys-crm/snapserve-setup/.env` is **revoked** — verified, returns 401. Put a live key
+  in `.env` and re-run `scripts/feed-call.mjs` to close this out.
 - **Cognee.** The client degrades correctly when memory is down, which is the behaviour
   that has actually been exercised. The graph itself has never been built.
 - **The Paytm leg.** `03-money-rail.json` has the shape and the policy gate, with

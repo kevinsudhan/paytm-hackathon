@@ -6,7 +6,7 @@
 #
 #   1. Push araxys-shipmate to a git repo
 #   2. Render -> New -> Blueprint -> point at that repo
-#   3. Set SHIPMATE_API_SECRET and GEMINI_API_KEY in the dashboard
+#   3. Set SHIPMATE_API_SECRET and ANTHROPIC_API_KEY in the dashboard
 #   4. The service URL becomes SHIPMATE_BASE in n8n
 #
 # Free tier sleeps after inactivity and takes ~30s to wake. That is survivable for a
@@ -30,8 +30,8 @@ services:
       - key: SHIPMATE_API_SECRET
         sync: false
 
-      # Call extraction only. Same provider the voice agents already run on.
-      - key: GEMINI_API_KEY
+      # Call extraction only. The key in araxys-crm/snapserve-setup/.env is revoked.
+      - key: ANTHROPIC_API_KEY
         sync: false
 
       # Cognee, if you deploy it. Left unset, memory degrades to empty and /health says so
