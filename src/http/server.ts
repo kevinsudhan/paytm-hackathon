@@ -34,6 +34,9 @@ import * as store from "../engines/store.js";
 import * as ledger from "../engines/auditLedger.js";
 import { sweep, board } from "../engines/cutoffSentinel.js";
 import { intake, type CallPayload } from "../engines/callIntake.js";
+import {
+  readEmail, ingestEmail, draftReply, type EmailPayload,
+} from "../engines/emailIntake.js";
 import * as memory from "../memory/cognee.js";
 
 const SECRET = process.env.SHIPMATE_API_SECRET ?? "";
@@ -150,6 +153,75 @@ app.post("/calls/ingest", wrap(async (req, res) => {
     exceptions: result.extraction?.exceptions ?? [],
   });
 }));
+
+// ---------------------------------------------------------------- email intake
+
+/**
+ * Read a message. Writes nothing, ever.
+ *
+ * Safe to call on anything, including mail nobody is sure about — the worst outcome is a
+ * Reading that no one acts on. n8n uses this when a human is going to look at the result.
+ */
+app.post("/email/read", wrap(async (req, res) => {
+  const payload = emailPayload(req.body ?? {});
+  if (!payload.messageId) return res.status(400).json({ error: "messageId is required" });
+  const reading = await readEmail(payload);
+  res.json({ messageId: payload.messageId, reading });
+}));
+
+/**
+ * Read a message and commit what it found — but only above the confidence floor.
+ *
+ * A phone call is already filtered: someone dialled a number and spoke. Email has no such
+ * filter, so the floor does that job. Anything below it comes back with `acted: false`
+ * and a reason, and nothing is written.
+ */
+app.post("/email/ingest", wrap(async (req, res) => {
+  const payload = emailPayload(req.body ?? {});
+  if (!payload.messageId) return res.status(400).json({ error: "messageId is required" });
+
+  const result = await ingestEmail(payload);
+  res.json({
+    messageId: result.messageId,
+    acted: result.acted,
+    skipped: result.skipped ?? null,
+    confidence: result.reading?.confidence ?? null,
+    isEnquiry: result.reading?.is_enquiry ?? null,
+    summary: result.reading?.summary ?? null,
+    reference: result.reading?.reference || null,
+    shipmentRef: result.twin?.shipmentRef ?? null,
+    remembered: result.remembered,
+    commitments: result.commitments.map((c) => ({
+      id: c.id, what: c.what, owner: c.owner, risk: c.risk, deadline: formatIst(c.deadline),
+    })),
+    exceptions: result.reading?.exceptions ?? [],
+  });
+}));
+
+/** Draft a reply body. Returns text — nothing here sends anything. */
+app.post("/email/draft", wrap(async (req, res) => {
+  const payload = emailPayload(req.body ?? {});
+  const draft = await draftReply(payload, req.body?.instruction);
+  if (!draft) return res.status(502).json({ error: "the model returned an empty draft" });
+  res.json({ draft });
+}));
+
+/** Accepts both Graph's spelling and a flat one, so n8n does not have to reshape. */
+function emailPayload(b: Record<string, unknown>): EmailPayload {
+  const bodyObj = b.body as { content?: string; contentType?: string } | string | undefined;
+  const isObj = typeof bodyObj === "object" && bodyObj !== null;
+  return {
+    messageId: String(b.messageId ?? b.id ?? ""),
+    subject: (b.subject as string) ?? undefined,
+    from:
+      (b.from as { emailAddress?: { address?: string } })?.emailAddress?.address ??
+      (typeof b.from === "string" ? b.from : undefined) ??
+      (b.sender as string) ?? undefined,
+    body: isObj ? bodyObj.content : (typeof bodyObj === "string" ? bodyObj : (b.bodyPreview as string)),
+    isHtml: isObj ? bodyObj.contentType === "html" : Boolean(b.isHtml),
+    receivedAt: (b.receivedAt as string) ?? (b.receivedDateTime as string) ?? undefined,
+  };
+}
 
 // ---------------------------------------------------------------- commitments
 

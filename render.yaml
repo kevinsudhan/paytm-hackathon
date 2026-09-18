@@ -34,6 +34,12 @@ services:
       - key: ANTHROPIC_API_KEY
         sync: false
 
+      # Email reading only. Without it the service still boots and calls still work.
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-3.5-flash
+
       # Cognee, if you deploy it. Left unset, memory degrades to empty and /health says so
       # rather than pretending it works.
       - key: COGNEE_BASE_URL
