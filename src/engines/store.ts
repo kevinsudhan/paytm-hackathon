@@ -42,6 +42,48 @@ export function commitmentsFor(shipmentRef: string): Commitment[] {
   return allCommitments().filter((c) => c.shipmentRef === shipmentRef);
 }
 
+/**
+ * What has already been ingested, keyed by source id — `call:24374`, `email:AAMk…`.
+ *
+ * A call or a message is a fact that happened once. Delivering it twice must not create
+ * the promise twice, because the second copy is indistinguishable from the first on the
+ * board and the desk chases a customer for a document they already sent.
+ *
+ * Two ways that happens in practice: SnapServe or a mailbox poller delivers the same
+ * payload again, or somebody replays one by hand while testing. The first is guarded
+ * against by always answering 200, but "unlikely" is not the same as "cannot".
+ *
+ * The prior result is stored rather than just the key, so a repeat delivery gets the same
+ * answer back instead of an empty one — a caller that asked what a call produced should
+ * not get a different reply depending on whether it was the first to ask.
+ */
+const processed = new Map<string, unknown>();
+
+/**
+ * Bounded, because an unbounded Map in a long-running service is a leak with a schedule.
+ * At a freight desk's volume the window is months of traffic; when it does roll over, the
+ * worst case is that a months-old redelivery is processed twice, which is the behaviour
+ * before this existed.
+ */
+const PROCESSED_LIMIT = 5000;
+
+export function alreadyProcessed<T>(key: string): T | undefined {
+  return processed.get(key) as T | undefined;
+}
+
+export function markProcessed(key: string, result: unknown): void {
+  // Oldest out first. Map preserves insertion order, so the first key is the oldest.
+  if (processed.size >= PROCESSED_LIMIT) {
+    const oldest = processed.keys().next().value;
+    if (oldest !== undefined) processed.delete(oldest);
+  }
+  processed.set(key, result);
+}
+
+export function processedCount(): number {
+  return processed.size;
+}
+
 export function putTwin(t: Twin): Twin {
   twins.set(t.shipmentRef, t);
   return t;
@@ -58,4 +100,5 @@ export function allTwins(): Twin[] {
 export function __reset(): void {
   commitments.clear();
   twins.clear();
+  processed.clear();
 }

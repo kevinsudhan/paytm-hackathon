@@ -25,7 +25,7 @@ import { GoogleGenAI } from "@google/genai";
 import { z } from "zod";
 import { createCommitment, type Commitment } from "../domain/commitment.js";
 import { createTwin, type StateName, type Twin } from "../domain/twin.js";
-import { putCommitment, putTwin, getTwin } from "./store.js";
+import { putCommitment, putTwin, getTwin, alreadyProcessed, markProcessed } from "./store.js";
 import { remember, type MemoryItem } from "../memory/cognee.js";
 
 /**
@@ -278,7 +278,21 @@ export interface EmailIntakeResult {
  * reaching Priya is already filtered — someone dialled a number and spoke to a person.
  * Email has no such filter, so the floor does that job instead.
  */
-export async function ingestEmail(payload: EmailPayload): Promise<EmailIntakeResult> {
+export async function ingestEmail(
+  payload: EmailPayload,
+  opts: { force?: boolean } = {},
+): Promise<EmailIntakeResult> {
+  // Same reasoning as calls: a message arrived once. A mailbox poller that re-delivers it
+  // must not create the promise twice.
+  const key = `email:${payload.messageId}`;
+  if (!opts.force) {
+    const prior = alreadyProcessed<EmailIntakeResult>(key);
+    if (prior) {
+      console.log(`[email] ${key} already processed — returning the first result`);
+      return { ...prior, skipped: prior.skipped ?? "already processed" };
+    }
+  }
+
   const reading = await readEmail(payload);
   if (!reading) {
     return {
@@ -288,17 +302,21 @@ export async function ingestEmail(payload: EmailPayload): Promise<EmailIntakeRes
   }
 
   if (!reading.is_enquiry) {
-    return {
+    const out: EmailIntakeResult = {
       messageId: payload.messageId, reading, commitments: [], twin: null,
       remembered: 0, acted: false, skipped: `not an enquiry — ${reading.reason}`,
     };
+    markProcessed(key, out);
+    return out;
   }
   if (reading.confidence < CONFIDENCE_FLOOR) {
-    return {
+    const out: EmailIntakeResult = {
       messageId: payload.messageId, reading, commitments: [], twin: null,
       remembered: 0, acted: false,
       skipped: `confidence ${reading.confidence.toFixed(2)} below the ${CONFIDENCE_FLOOR} floor`,
     };
+    markProcessed(key, out);
+    return out;
   }
 
   const customer = reading.company || reading.contact_name || reading.email || "unknown sender";
@@ -354,9 +372,11 @@ export async function ingestEmail(payload: EmailPayload): Promise<EmailIntakeRes
   }
   const { added } = await remember(items);
 
-  return {
+  const out: EmailIntakeResult = {
     messageId: payload.messageId, reading, commitments, twin, remembered: added, acted: true,
   };
+  markProcessed(key, out);
+  return out;
 }
 
 /**

@@ -19,7 +19,7 @@ import {
   createCommitment, type Commitment, type Dependency, type Owner,
 } from "../domain/commitment.js";
 import { createTwin, type StateName, type Twin } from "../domain/twin.js";
-import { putCommitment, putTwin, getTwin } from "./store.js";
+import { putCommitment, putTwin, getTwin, alreadyProcessed, markProcessed } from "./store.js";
 import { remember, type MemoryItem } from "../memory/cognee.js";
 
 const client = new Anthropic(); // resolves ANTHROPIC_API_KEY / auth profile
@@ -200,13 +200,29 @@ export interface IntakeResult {
  * running extraction over 246 historical calls of which most are wrong numbers costs real
  * money to produce nothing. 40 characters is roughly one exchanged sentence.
  */
-export async function intake(payload: CallPayload): Promise<IntakeResult> {
+export async function intake(payload: CallPayload, opts: { force?: boolean } = {}): Promise<IntakeResult> {
+  // A call happened once. Delivering it twice must not make the promise twice — the second
+  // copy is indistinguishable on the board, and the desk chases a customer for a document
+  // they already sent. Marked only after a successful run, so a failure can be retried.
+  const key = `call:${payload.callId}`;
+  if (!opts.force) {
+    const prior = alreadyProcessed<IntakeResult>(key);
+    if (prior) {
+      console.log(`[intake] ${key} already processed — returning the first result`);
+      return { ...prior, skipped: prior.skipped ?? "already processed" };
+    }
+  }
+
   const transcript = repairSpacing(payload.transcript ?? "");
   if (transcript.trim().length < 40) {
-    return {
+    // Recorded too: a redelivered no-pickup should not cost another model call to decide
+    // it is still a no-pickup.
+    const short: IntakeResult = {
       callId: payload.callId, extraction: null, commitments: [], twin: null,
       remembered: 0, skipped: "transcript too short to contain a commitment",
     };
+    markProcessed(key, short);
+    return short;
   }
 
   const callTime = payload.createdAt ?? new Date().toISOString();
@@ -229,6 +245,8 @@ export async function intake(payload: CallPayload): Promise<IntakeResult> {
 
   const extraction = response.parsed_output;
   if (!extraction) {
+    // Deliberately NOT marked processed. An unparseable answer is a transient model
+    // failure, and a retry is exactly what should happen.
     return {
       callId: payload.callId, extraction: null, commitments: [], twin: null,
       remembered: 0, skipped: "model returned no parseable extraction",
@@ -262,7 +280,9 @@ export async function intake(payload: CallPayload): Promise<IntakeResult> {
 
   const remembered = await rememberCall(payload, extraction, customer, shipmentRef);
 
-  return { callId: payload.callId, extraction, commitments, twin, remembered };
+  const result: IntakeResult = { callId: payload.callId, extraction, commitments, twin, remembered };
+  markProcessed(key, result);
+  return result;
 }
 
 function toOwner(party: z.infer<typeof PartySchema>): Owner {

@@ -137,7 +137,9 @@ app.post("/calls/ingest", wrap(async (req, res) => {
   };
   if (!payload.callId) return res.status(400).json({ error: "callId is required" });
 
-  const result = await intake(payload);
+  // force=true re-runs an already-ingested call. For replaying a transcript on purpose,
+  // never for ordinary delivery — that is what the guard is for.
+  const result = await intake(payload, { force: req.body?.force === true });
   res.json({
     callId: result.callId,
     skipped: result.skipped ?? null,
@@ -183,7 +185,7 @@ app.post("/email/ingest", wrap(async (req, res) => {
   const payload = emailPayload(req.body ?? {});
   if (!payload.messageId) return res.status(400).json({ error: "messageId is required" });
 
-  const result = await ingestEmail(payload);
+  const result = await ingestEmail(payload, { force: req.body?.force === true });
   res.json({
     messageId: result.messageId,
     acted: result.acted,
