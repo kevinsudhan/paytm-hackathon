@@ -1,0 +1,44 @@
+# Cognee — the shipment memory behind the deck's "learned behaviour" tile.
+#
+# Kept as its own service rather than a library because Cognee is Python and SHIPMATE is
+# TypeScript, and because the graph build is slow and CPU-heavy: giving it its own
+# container means a nightly cognify cannot stall a webhook that a live call is waiting on.
+#
+#   docker compose up -d cognee
+#   curl localhost:8000/health
+#
+# SHIPMATE runs fine without this. Every memory call degrades to empty and /health reports
+# `reachable: false` rather than pretending memory is working.
+
+services:
+  cognee:
+    image: cognee/cognee:latest
+    container_name: araxys-cognee
+    ports:
+      - "8000:8000"
+    environment:
+      # Cognee needs an LLM for entity extraction and graph building. Same key SHIPMATE
+      # uses for call extraction — the one in araxys-crm/snapserve-setup/.env is revoked,
+      # so put a live one in .env before starting this.
+      LLM_PROVIDER: anthropic
+      LLM_MODEL: claude-opus-5
+      LLM_API_KEY: ${ANTHROPIC_API_KEY}
+      # Local file-backed stores. Fine for the hackathon; swap for Postgres + a real
+      # vector store when this outlives the demo.
+      VECTOR_DB_PROVIDER: lancedb
+      GRAPH_DATABASE_PROVIDER: kuzu
+      DB_PROVIDER: sqlite
+    volumes:
+      - cognee-data:/app/.cognee_system
+      - cognee-storage:/app/.data_storage
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+
+volumes:
+  cognee-data:
+  cognee-storage:

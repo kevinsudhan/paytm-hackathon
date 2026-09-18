@@ -1,0 +1,371 @@
+{
+  "name": "SHIPMATE 03 — Money rail",
+  "meta": {
+    "description": "Slide 11: demurrage detected -> invoice -> Paytm link -> payment confirmed -> delivery order released. The policy gate is checked BEFORE the link is issued, not after, so an over-threshold amount never reaches the consignee unapproved.",
+    "shipmate": {
+      "slide": "11 — the money rail",
+      "requires": [
+        "SHIPMATE_BASE",
+        "shipmate-secret credential",
+        "PAYTM_MID",
+        "paytm-key credential"
+      ]
+    }
+  },
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "shipmate/demurrage",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "wh-demurrage",
+      "name": "Demurrage clock detected",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -580,
+        300
+      ],
+      "notes": "Fired by the arrival milestone or by the sentinel. Body: { shipmentRef, consignee, phone, freeDaysExpired, perDayInr, days }"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Line items, with GST applied. Kept in one place so the invoice, the payment link and\n// the ledger entry all quote the same number — three places computing tax separately is\n// how a customer gets billed an amount nobody can reproduce later.\nconst b = $input.first().json.body;\n\nconst perDay = Number(b.perDayInr ?? 4000);\nconst days = Number(b.days ?? 1);\nconst demurrage = perDay * days;\nconst GST_RATE = 0.18;\n\nconst lines = [\n  { description: `Demurrage, ${days} day(s) at INR ${perDay}/day`, amount: demurrage },\n];\n\nconst subtotal = lines.reduce((s, l) => s + l.amount, 0);\nconst gst = Math.round(subtotal * GST_RATE);\nconst total = subtotal + gst;\n\nreturn [{ json: {\n  shipmentRef: b.shipmentRef,\n  consignee: b.consignee,\n  phone: b.phone,\n  lines,\n  subtotal,\n  gst,\n  gstRate: GST_RATE,\n  total,\n  currency: 'INR',\n} }];"
+      },
+      "id": "code-invoice",
+      "name": "Build invoice, apply GST",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -360,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SHIPMATE_BASE }}/twins/{{ $json.shipmentRef }}/can",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ action: 'issue_payment_link', amountInr: $json.total }) }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "http-can",
+      "name": "May we issue this link?",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -140,
+        300
+      ],
+      "notes": "Two gates in one answer: is issue_payment_link legal in this shipment's current state, and is the amount under the approval threshold. Asked before the money moves, not after.",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "shipmatesecret01",
+          "name": "shipmate-secret"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "permitted",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              },
+              "leftValue": "={{ $json.permitted }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "if-permitted",
+      "name": "Permitted?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        80,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://securegw.paytm.in/link/create",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  mid: $env.PAYTM_MID,\n  linkType: 'FIXED',\n  linkDescription: 'Demurrage — ' + $('Build invoice, apply GST').item.json.shipmentRef,\n  linkName: $('Build invoice, apply GST').item.json.shipmentRef,\n  amount: { value: String($('Build invoice, apply GST').item.json.total), currency: 'INR' },\n  customerContact: { customerEmail: '', customerMobile: $('Build invoice, apply GST').item.json.phone }\n}) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "http-paytm",
+      "name": "Paytm payment link",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        300,
+        220
+      ],
+      "notes": "Fill PAYTM_MID and the paytm-key credential before enabling. Paytm's link API signs the body with your merchant key — if your account uses checksum signing, add a Code node that computes it and put the result in the head.signature field.",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "paytmkey01",
+          "name": "paytm-key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "## Held for finance\n\nOver the ₹50,000 threshold, or the shipment is not in a state where a payment link is legal.\n\nSHIPMATE has already written a `held` entry to the ledger — it is in `GET /ledger/held`. The desk approves it there; nothing was sent to the consignee.\n\nThis branch exists so \"autonomy with a brake\" is a code path, not a sentence on a slide.",
+        "height": 280,
+        "width": 340
+      },
+      "id": "note-held",
+      "name": "Held branch",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        300,
+        460
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "shipmate/paytm-callback",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "wh-paid",
+      "name": "Paytm payment callback",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -580,
+        700
+      ],
+      "webhookId": "shipmate-paytm-callback",
+      "notes": "VERIFY THE CHECKSUM before trusting this. Anyone can POST to a webhook URL, and this one releases cargo. Add a Code node that validates Paytm's checksumhash against your merchant key and drops anything that fails."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "success",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              },
+              "leftValue": "={{ $json.body.STATUS }}",
+              "rightValue": "TXN_SUCCESS"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "if-paid",
+      "name": "Actually paid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -360,
+        700
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SHIPMATE_BASE }}/twins/{{ $json.body.ORDERID }}/can",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\"action\": \"release_do\"}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "http-can-do",
+      "name": "May we release the DO?",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -140,
+        700
+      ],
+      "notes": "It will say no — release_do is on the ALWAYS_APPROVED list in policy.ts. Payment clearing is automatic; handing over the cargo is not. That is the intended answer, and the branch below routes it to the desk.",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "shipmatesecret01",
+          "name": "shipmate-secret"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ received: true }) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "respond-paid",
+      "name": "200",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        80,
+        700
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ received: true, held: !$('May we issue this link?').item.json.permitted }) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "respond-demurrage",
+      "name": "200 to caller",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        520,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "Demurrage clock detected": {
+      "main": [
+        [
+          {
+            "node": "Build invoice, apply GST",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build invoice, apply GST": {
+      "main": [
+        [
+          {
+            "node": "May we issue this link?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "May we issue this link?": {
+      "main": [
+        [
+          {
+            "node": "Permitted?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Permitted?": {
+      "main": [
+        [
+          {
+            "node": "Paytm payment link",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "200 to caller",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Paytm payment link": {
+      "main": [
+        [
+          {
+            "node": "200 to caller",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Paytm payment callback": {
+      "main": [
+        [
+          {
+            "node": "Actually paid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Actually paid?": {
+      "main": [
+        [
+          {
+            "node": "May we release the DO?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "200",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "May we release the DO?": {
+      "main": [
+        [
+          {
+            "node": "200",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}

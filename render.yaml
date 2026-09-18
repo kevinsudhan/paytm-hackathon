@@ -1,0 +1,42 @@
+# One-click deploy for SHIPMATE, so n8n Cloud has something stable to call.
+#
+# Render is chosen over a tunnel for one reason: the hostname survives a laptop closing.
+# Every previous attempt to give these agents a tool endpoint used a quick-tunnel, and all
+# three of those hostnames are now dead.
+#
+#   1. Push araxys-shipmate to a git repo
+#   2. Render -> New -> Blueprint -> point at that repo
+#   3. Set SHIPMATE_API_SECRET and ANTHROPIC_API_KEY in the dashboard
+#   4. The service URL becomes SHIPMATE_BASE in n8n
+#
+# Free tier sleeps after inactivity and takes ~30s to wake. That is survivable for a
+# webhook (n8n retries) but will make the first demo call of the day feel slow — start it
+# with a health check a minute before demoing, or use the paid tier.
+
+services:
+  - type: web
+    name: araxys-shipmate
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    region: singapore # closest to ap-south-1 and the desk itself
+    healthCheckPath: /health
+    envVars:
+      - key: PORT
+        value: 8788
+
+      # Generate once, then paste the same value into the n8n 'shipmate-secret'
+      # credential. The service will not boot without it.
+      - key: SHIPMATE_API_SECRET
+        sync: false
+
+      # Call extraction only. The key in araxys-crm/snapserve-setup/.env is revoked.
+      - key: ANTHROPIC_API_KEY
+        sync: false
+
+      # Cognee, if you deploy it. Left unset, memory degrades to empty and /health says so
+      # rather than pretending it works.
+      - key: COGNEE_BASE_URL
+        sync: false
+      - key: COGNEE_DATASET
+        value: araxys_shipments

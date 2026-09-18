@@ -1,0 +1,347 @@
+/**
+ * The SHIPMATE API. n8n is the only thing that should be calling it.
+ *
+ * ---------------------------------------------------------------------------
+ * AUTH FAILS CLOSED. THIS IS DELIBERATE AND IT IS NOT NEGOTIABLE.
+ *
+ * The v1 CRM shipped five Edge Functions with `verify_jwt=false`. Three of them check a
+ * shared secret like this:
+ *
+ *     if (expected && req.headers.get("x-cron-secret") !== expected) return 401;
+ *
+ * Read the `expected &&`. If the secret is not configured, the check passes and the
+ * endpoint is open. On 18 Sep 2026 `GET /records` on that project returned nine real
+ * customer records — names, phone numbers, cargo — to a request with no credential at all.
+ *
+ * So here the service refuses to start without SHIPMATE_API_SECRET. A misconfigured
+ * deployment that will not boot is a loud, cheap problem. A misconfigured deployment that
+ * boots and serves customer data to anyone who finds the URL is the other kind.
+ * ---------------------------------------------------------------------------
+ */
+
+import express, { type Request, type Response, type NextFunction } from "express";
+import "dotenv/config";
+
+import {
+  resolve as resolveCommitment, satisfyDependency, formatIst, createCommitment,
+} from "../domain/commitment.js";
+import {
+  can, readiness, unmetRequirements, advance, createTwin,
+  type Action, type StateName,
+} from "../domain/twin.js";
+import { decide } from "../domain/policy.js";
+import * as store from "../engines/store.js";
+import * as ledger from "../engines/auditLedger.js";
+import { sweep, board } from "../engines/cutoffSentinel.js";
+import { intake, type CallPayload } from "../engines/callIntake.js";
+import * as memory from "../memory/cognee.js";
+
+const SECRET = process.env.SHIPMATE_API_SECRET ?? "";
+const PORT = Number(process.env.PORT ?? 8788);
+
+if (!SECRET) {
+  console.error(
+    "\nSHIPMATE_API_SECRET is not set.\n\n" +
+    "This service will not start without it. Generate one and put it in .env:\n" +
+    "  node -e \"console.log(require('crypto').randomBytes(32).toString('hex'))\"\n\n" +
+    "The same value goes in the n8n credential that calls this API.\n",
+  );
+  process.exit(1);
+}
+
+const app = express();
+app.use(express.json({ limit: "2mb" }));
+
+/**
+ * No CORS headers anywhere in this file, on purpose.
+ *
+ * Nothing in a browser should reach this API — n8n calls it server to server. Adding
+ * `Access-Control-Allow-Origin: *` here, as v1's api function does, would invite exactly
+ * the front-end-calls-backend-directly pattern that put customer records on the open web.
+ */
+app.use((req: Request, res: Response, next: NextFunction) => {
+  if (req.path === "/health") return next();
+  const given = req.header("x-shipmate-secret");
+  if (!given || given !== SECRET) {
+    console.warn(`[auth] rejected ${req.method} ${req.path} from ${req.ip}`);
+    return res.status(401).json({ error: "unauthorized" });
+  }
+  next();
+});
+
+/** Express 5 types params as string | string[]; routes here only ever take one. */
+const param = (req: Request, name: string): string => {
+  const v = req.params[name];
+  return Array.isArray(v) ? (v[0] ?? "") : (v ?? "");
+};
+
+const wrap = (fn: (req: Request, res: Response) => Promise<unknown>) =>
+  (req: Request, res: Response) => {
+    fn(req, res).catch((e: unknown) => {
+      const message = e instanceof Error ? e.message : String(e);
+      console.error(`[error] ${req.method} ${req.path} — ${message}`);
+      if (!res.headersSent) res.status(500).json({ error: message });
+    });
+  };
+
+// ---------------------------------------------------------------- health
+
+app.get("/health", wrap(async (_req, res) => {
+  const mem = await memory.health();
+  res.json({
+    ok: true,
+    service: "shipmate",
+    commitments: store.allCommitments().length,
+    open: store.openCommitments().length,
+    twins: store.allTwins().length,
+    autonomy: ledger.autonomyRate(),
+    memory: mem,
+  });
+}));
+
+// ---------------------------------------------------------------- call intake
+
+/**
+ * Where a finished call becomes commitments. n8n posts SnapServe's webhook body here.
+ *
+ * Accepts both SnapServe's field spellings and flat ones, because the webhook body and
+ * the /calls API return the same call with different key names and n8n is not the place
+ * to normalise that.
+ */
+app.post("/calls/ingest", wrap(async (req, res) => {
+  const b = req.body ?? {};
+  const payload: CallPayload = {
+    callId: String(b.callId ?? b.id ?? b.call_id ?? ""),
+    agentId: Number(b.agentId ?? b.agent_id ?? 0),
+    agentName: b.agentName ?? b.agent_name,
+    fromNumber: b.fromNumber ?? b.from_number ?? b.from,
+    toNumber: b.toNumber ?? b.to_number ?? b.to,
+    transcript: String(b.transcript ?? ""),
+    durationSeconds: Number(b.durationSeconds ?? b.duration_seconds ?? 0) || undefined,
+    createdAt: b.createdAt ?? b.created_at ?? new Date().toISOString(),
+  };
+  if (!payload.callId) return res.status(400).json({ error: "callId is required" });
+
+  const result = await intake(payload);
+  res.json({
+    callId: result.callId,
+    skipped: result.skipped ?? null,
+    summary: result.extraction?.summary ?? null,
+    stage: result.extraction?.stage ?? null,
+    shipmentRef: result.twin?.shipmentRef ?? null,
+    remembered: result.remembered,
+    commitments: result.commitments.map((c) => ({
+      id: c.id, what: c.what, owner: c.owner, risk: c.risk,
+      deadline: formatIst(c.deadline),
+      blockedOn: c.dependsOn.filter((d) => !d.satisfied).map((d) => d.label),
+    })),
+    exceptions: result.extraction?.exceptions ?? [],
+  });
+}));
+
+// ---------------------------------------------------------------- commitments
+
+app.get("/commitments", wrap(async (req, res) => {
+  const open = req.query.open !== "false";
+  res.json(open ? store.openCommitments() : store.allCommitments());
+}));
+
+/**
+ * Create a commitment directly.
+ *
+ * Calls create most of them, but not all: an email, a carrier advisory or an operator
+ * noticing something all produce real promises, and n8n needs a way in that does not
+ * involve inventing a transcript. `origin` is required so every commitment can still be
+ * traced back to why it exists.
+ */
+app.post("/commitments", wrap(async (req, res) => {
+  const b = req.body ?? {};
+  if (!b.customer || !b.what || !b.deadline || !b.origin) {
+    return res.status(400).json({ error: "customer, what, deadline and origin are required" });
+  }
+  try {
+    res.status(201).json(store.putCommitment(createCommitment({
+      customer: String(b.customer),
+      shipmentRef: b.shipmentRef ?? null,
+      what: String(b.what),
+      deadline: String(b.deadline),
+      owner: b.owner,
+      dependsOn: Array.isArray(b.dependsOn) ? b.dependsOn : [],
+      risk: b.risk,
+      reason: b.reason,
+      origin: String(b.origin),
+    })));
+  } catch (e) {
+    // createCommitment throws on a malformed deadline — that is a client error, not a 500.
+    res.status(400).json({ error: e instanceof Error ? e.message : String(e) });
+  }
+}));
+
+/** The cut-off board — everything open, soonest deadline first. */
+app.get("/commitments/board", wrap(async (_req, res) => res.json(board())));
+
+app.post("/commitments/:id/satisfy", wrap(async (req, res) => {
+  const c = store.getCommitment(param(req, "id"));
+  if (!c) return res.status(404).json({ error: `no commitment ${param(req, "id")}` });
+  const { key, source } = req.body ?? {};
+  if (!key) return res.status(400).json({ error: "key is required" });
+  res.json(store.putCommitment(satisfyDependency(c, String(key), String(source ?? "manual"))));
+}));
+
+app.post("/commitments/:id/resolve", wrap(async (req, res) => {
+  const c = store.getCommitment(param(req, "id"));
+  if (!c) return res.status(404).json({ error: `no commitment ${param(req, "id")}` });
+  const evidence = Array.isArray(req.body?.evidence) ? req.body.evidence : [];
+  if (evidence.length === 0) {
+    // Mirrors the domain rule rather than letting it throw a 500 — a caller that forgot
+    // evidence deserves to be told that, not an opaque server error.
+    return res.status(400).json({ error: "evidence is required to fulfil a commitment" });
+  }
+  res.json(store.putCommitment(resolveCommitment(c, evidence)));
+}));
+
+// ---------------------------------------------------------------- twins
+
+/** Create a twin. Intake makes these from calls; the desk and n8n need a way in too. */
+app.post("/twins", wrap(async (req, res) => {
+  const { shipmentRef, customer, state } = req.body ?? {};
+  if (!shipmentRef || !customer) {
+    return res.status(400).json({ error: "shipmentRef and customer are required" });
+  }
+  const existing = store.getTwin(String(shipmentRef));
+  if (existing) return res.status(200).json(existing);
+  res.status(201).json(store.putTwin(
+    createTwin(String(shipmentRef), String(customer), (state ?? "booking") as StateName),
+  ));
+}));
+
+app.get("/twins/:ref", wrap(async (req, res) => {
+  const t = store.getTwin(param(req, "ref"));
+  if (!t) return res.status(404).json({ error: `no twin for ${param(req, "ref")}` });
+  res.json({
+    ...t,
+    readiness: readiness(t),
+    unmet: unmetRequirements(t),
+    commitments: store.commitmentsFor(t.shipmentRef).length,
+  });
+}));
+
+app.post("/twins/:ref/advance", wrap(async (req, res) => {
+  const t = store.getTwin(param(req, "ref"));
+  if (!t) return res.status(404).json({ error: `no twin for ${param(req, "ref")}` });
+  const { to, why, force } = req.body ?? {};
+  if (!to || !why) return res.status(400).json({ error: "to and why are required" });
+  res.json(store.putTwin(advance(t, to as StateName, String(why), { force: Boolean(force) })));
+}));
+
+/**
+ * Ask whether an action is permitted, without taking it.
+ *
+ * n8n calls this before an autopilot branch so the workflow can route to the approvals
+ * queue instead of attempting something and reading a failure. Returns both gates
+ * separately — see the note at the top of policy.ts.
+ */
+app.post("/twins/:ref/can", wrap(async (req, res) => {
+  const t = store.getTwin(param(req, "ref"));
+  if (!t) return res.status(404).json({ error: `no twin for ${param(req, "ref")}` });
+  const action = req.body?.action as Action;
+  if (!action) return res.status(400).json({ error: "action is required" });
+  const legal = can(t, action);
+  const policy = decide(action, { amountInr: req.body?.amountInr, discountPct: req.body?.discountPct });
+  res.json({
+    action,
+    state: t.state,
+    legal: legal.ok,
+    legalReason: legal.ok ? null : legal.reason,
+    autonomy: policy.autonomy,
+    policyReason: policy.autonomy === "approve" ? policy.why : null,
+    approver: policy.autonomy === "approve" ? policy.approver : null,
+    permitted: legal.ok && policy.autonomy === "alone",
+  });
+}));
+
+/**
+ * Take an action, through both gates and the ledger.
+ *
+ * `/can` answers; this one does. Every autonomous action on a shipment goes through here,
+ * which is what makes `GET /ledger` a complete record rather than a partial one — an
+ * action that bypassed the ledger would be invisible in exactly the situation someone
+ * needs it.
+ *
+ * The work itself is a no-op right now: SHIPMATE decides and records, and n8n performs
+ * the side effect (send the mail, issue the Paytm link) on the branch it takes from the
+ * response. Keeping the effect out of this process means a failed HTTP call cannot leave
+ * the ledger claiming something happened that did not.
+ */
+app.post("/twins/:ref/act", wrap(async (req, res) => {
+  const ref = param(req, "ref");
+  const t = store.getTwin(ref);
+  if (!t) return res.status(404).json({ error: `no twin for ${ref}` });
+
+  const action = req.body?.action as Action;
+  const summary = req.body?.summary;
+  if (!action || !summary) return res.status(400).json({ error: "action and summary are required" });
+
+  const legal = can(t, action);
+  if (!legal.ok) return res.status(409).json({ error: legal.reason, state: t.state });
+
+  const { entry } = await ledger.record({
+    action,
+    shipmentRef: ref,
+    customer: t.customer,
+    summary: String(summary),
+    context: { amountInr: req.body?.amountInr, discountPct: req.body?.discountPct },
+    reversible: req.body?.reversible !== false,
+    reversalHint: req.body?.reversalHint,
+  }, async () => req.body?.result ?? { performedBy: "n8n" });
+
+  res.json({
+    entryId: entry.id,
+    outcome: entry.outcome,
+    autonomy: entry.verdict.autonomy,
+    approver: entry.verdict.autonomy === "approve" ? entry.verdict.approver : null,
+    why: entry.verdict.autonomy === "approve" ? entry.verdict.why : null,
+    reversible: entry.reversible,
+  });
+}));
+
+// ---------------------------------------------------------------- sentinel
+
+app.post("/sentinel/sweep", wrap(async (req, res) => {
+  res.json(sweep({
+    escalateTo: req.body?.escalateTo,
+    escalateWhenBlockedWithinHours: req.body?.withinHours,
+  }));
+}));
+
+// ---------------------------------------------------------------- ledger
+
+app.get("/ledger", wrap(async (_req, res) => res.json(ledger.all())));
+app.get("/ledger/held", wrap(async (_req, res) => res.json(ledger.held())));
+app.get("/ledger/:ref", wrap(async (req, res) => res.json(ledger.forShipment(param(req, "ref")))));
+
+app.post("/ledger/:id/reverse", wrap(async (req, res) => {
+  const why = req.body?.why;
+  if (!why) return res.status(400).json({ error: "why is required to reverse an action" });
+  try {
+    res.json(ledger.reverse(param(req, "id"), String(why)));
+  } catch (e) {
+    res.status(409).json({ error: e instanceof Error ? e.message : String(e) });
+  }
+}));
+
+// ---------------------------------------------------------------- memory
+
+app.post("/memory/recall", wrap(async (req, res) => {
+  const q = req.body?.query;
+  if (!q) return res.status(400).json({ error: "query is required" });
+  res.json({ insights: await memory.recall(String(q), { limit: req.body?.limit }) });
+}));
+
+app.post("/memory/cognify", wrap(async (_req, res) => res.json(await memory.cognify())));
+
+app.listen(PORT, () => {
+  console.log(`[shipmate] listening on :${PORT}`);
+  console.log(`[shipmate] memory at ${process.env.COGNEE_BASE_URL ?? "http://localhost:8000"}`);
+  console.log("[shipmate] auth required on every route except /health");
+});

@@ -1,0 +1,254 @@
+{
+  "name": "SHIPMATE 01 — Call to commitments",
+  "meta": {
+    "description": "SnapServe posts every finished call here. This is the agent's webhookUrl target and the reason Priya and Arun are 'live': the call itself needs no tools, the intelligence runs on this side. Set the Webhook node's production URL as webhookUrl on agents 717 and 758 (scripts/wire-agent-webhook.mjs does it).",
+    "shipmate": {
+      "slide": "05 — the call graph",
+      "requires": [
+        "SHIPMATE_BASE",
+        "shipmate-secret credential"
+      ]
+    }
+  },
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "snapserve/call",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": false
+        }
+      },
+      "id": "wh-call",
+      "name": "SnapServe call webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -360,
+        300
+      ],
+      "webhookId": "shipmate-snapserve-call"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "is-completed",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              },
+              "leftValue": "={{ $json.body.status || $json.body.event || '' }}",
+              "rightValue": "completed"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "if-completed",
+      "name": "Call actually completed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -140,
+        300
+      ],
+      "notes": "no_pickup and in-progress events carry no transcript worth extracting. SHIPMATE skips short ones anyway, but filtering here saves the round trip."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SHIPMATE_BASE }}/calls/ingest",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.body) }}",
+        "options": {
+          "timeout": 120000,
+          "response": {
+            "response": {
+              "neverError": true,
+              "fullResponse": true
+            }
+          }
+        }
+      },
+      "id": "http-ingest",
+      "name": "SHIPMATE /calls/ingest",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        80,
+        220
+      ],
+      "notes": "120s timeout: extraction is one Claude call over a full transcript. neverError so a failed extraction still returns 200 to SnapServe — see the Respond node.",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "shipmatesecret01",
+          "name": "shipmate-secret"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "has-commitments",
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              },
+              "leftValue": "={{ ($json.body && $json.body.commitments ? $json.body.commitments.length : 0) }}",
+              "rightValue": 0
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "if-commitments",
+      "name": "Any promises made?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        300,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SHIPMATE_BASE }}/sentinel/sweep",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\"escalateTo\": \"Aashish\", \"withinHours\": 4}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "http-sweep",
+      "name": "Re-sweep the board",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        520,
+        140
+      ],
+      "notes": "New commitments change the risk picture immediately. Sweeping here means the desk sees a high-risk promise the moment the call ends, not at the next cron tick.",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "shipmatesecret01",
+          "name": "shipmate-secret"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ received: true, callId: $('SnapServe call webhook').item.json.body.id || null }) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "respond",
+      "name": "200 to SnapServe",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        740,
+        300
+      ],
+      "notes": "Always 200. SnapServe retries non-2xx, and a retry storm over a transcript we already stored would double-create commitments."
+    }
+  ],
+  "connections": {
+    "SnapServe call webhook": {
+      "main": [
+        [
+          {
+            "node": "Call actually completed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call actually completed?": {
+      "main": [
+        [
+          {
+            "node": "SHIPMATE /calls/ingest",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "200 to SnapServe",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SHIPMATE /calls/ingest": {
+      "main": [
+        [
+          {
+            "node": "Any promises made?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Any promises made?": {
+      "main": [
+        [
+          {
+            "node": "Re-sweep the board",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "200 to SnapServe",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Re-sweep the board": {
+      "main": [
+        [
+          {
+            "node": "200 to SnapServe",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}

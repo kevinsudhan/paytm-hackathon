@@ -1,0 +1,231 @@
+{
+  "name": "SHIPMATE 02 — Cut-off sentinel",
+  "meta": {
+    "description": "Every deadline at once, on a 15-minute cron. Sweeps the whole book, escalates what a human can still save, and rebuilds shipment memory once a night. Slide 04's 'CUT OFF SENTINEL' tile.",
+    "shipmate": {
+      "slide": "04 — cross-book engines",
+      "requires": [
+        "SHIPMATE_BASE",
+        "shipmate-secret credential"
+      ]
+    }
+  },
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 15
+            }
+          ]
+        }
+      },
+      "id": "cron-15",
+      "name": "Every 15 minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -360,
+        200
+      ],
+      "notes": "15 minutes is chosen against the thing being watched: gate-in cut-offs move in hours, not seconds. Escalation is at-most-once per commitment on the SHIPMATE side, so a tighter cron would not produce more alerts, only more load."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SHIPMATE_BASE }}/sentinel/sweep",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\"escalateTo\": \"Aashish\", \"withinHours\": 4}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "http-sweep",
+      "name": "Sweep every open commitment",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -140,
+        200
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "shipmatesecret01",
+          "name": "shipmate-secret"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "version": 2
+          },
+          "combinator": "or",
+          "conditions": [
+            {
+              "id": "any-escalation",
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              },
+              "leftValue": "={{ $json.escalations.length }}",
+              "rightValue": 0
+            },
+            {
+              "id": "any-missed",
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              },
+              "leftValue": "={{ $json.missed.length }}",
+              "rightValue": 0
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "if-anything",
+      "name": "Anything a human must see?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        80,
+        200
+      ],
+      "notes": "A quiet sweep sends nothing. The whole value of this alert is that it is rare enough to be read."
+    },
+    {
+      "parameters": {
+        "jsCode": "// One message per sweep, not one per commitment. A desk that gets six separate\n// WhatsApps about the same afternoon stops opening them.\nconst r = $input.first().json;\nconst lines = [];\n\nif (r.escalations.length) {\n  lines.push(`*${r.escalations.length} commitment(s) need you now*`);\n  for (const e of r.escalations) {\n    lines.push(`• ${e.customer} — ${e.what}\\n  ${e.why}`);\n  }\n}\n\nif (r.missed.length) {\n  lines.push(`\\n*${r.missed.length} missed*`);\n  for (const m of r.missed) {\n    lines.push(`• ${m.customer} — ${m.what} (was due ${m.deadline})`);\n  }\n}\n\nconst raisedHigh = r.raised.filter((x) => x.to === 'high');\nif (raisedHigh.length) {\n  lines.push(`\\n${raisedHigh.length} moved to high risk: ${raisedHigh.map((x) => x.customer).join(', ')}`);\n}\n\nreturn [{ json: { text: lines.join('\\n'), swept: r.swept, at: r.at } }];"
+      },
+      "id": "code-digest",
+      "name": "One digest, not six alerts",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        300,
+        120
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Wire your own channel here\n\nThe digest arrives as `{{ $json.text }}`, already formatted.\n\nAdd a WhatsApp / Slack / email node after this one. It is left unconnected on purpose — the deck's outbound-call leg (slide 05) needs a SnapServe outbound campaign, and whichever channel you pick should be a decision, not a default someone inherits.",
+        "height": 260,
+        "width": 380
+      },
+      "id": "note-channel",
+      "name": "Notify — your choice",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        520,
+        60
+      ]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "30 20 * * *"
+            }
+          ]
+        }
+      },
+      "id": "cron-nightly",
+      "name": "Nightly at 02:00 IST",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -360,
+        440
+      ],
+      "notes": "20:30 UTC is 02:00 IST. Cognify is slow and CPU-heavy; running it while the desk is asleep keeps it off the path of a live call."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SHIPMATE_BASE }}/memory/cognify",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 600000
+        }
+      },
+      "id": "http-cognify",
+      "name": "Rebuild shipment memory (Cognee)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -140,
+        440
+      ],
+      "notes": "Builds the knowledge graph over everything added since the last run. 10-minute timeout — a night's calls can take a while and a truncated cognify leaves the graph half-built.",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "shipmatesecret01",
+          "name": "shipmate-secret"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Every 15 minutes": {
+      "main": [
+        [
+          {
+            "node": "Sweep every open commitment",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sweep every open commitment": {
+      "main": [
+        [
+          {
+            "node": "Anything a human must see?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Anything a human must see?": {
+      "main": [
+        [
+          {
+            "node": "One digest, not six alerts",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Nightly at 02:00 IST": {
+      "main": [
+        [
+          {
+            "node": "Rebuild shipment memory (Cognee)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}
