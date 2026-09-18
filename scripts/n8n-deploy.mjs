@@ -93,6 +93,66 @@ function importable(wf) {
   };
 }
 
+/**
+ * Makes sure the `shipmate-secret` credential exists on the instance, and returns its id.
+ *
+ * The workflow files carry a placeholder credential id. n8n refuses an import that
+ * references a credential it does not know — "contains credentials that are not shared
+ * with you" — so the placeholder has to become a real id before the workflows are sent.
+ *
+ * The id is written back to .env so a second run reuses it. The public API has no reliable
+ * way to list credentials, so without that record every run would create another copy and
+ * the instance would silently fill with duplicates.
+ */
+async function ensureCredential() {
+  if (env.N8N_CREDENTIAL_ID) {
+    console.log(`using existing credential ${env.N8N_CREDENTIAL_ID}\n`);
+    return env.N8N_CREDENTIAL_ID;
+  }
+
+  const secret = env.SHIPMATE_API_SECRET ?? process.env.SHIPMATE_API_SECRET;
+  if (!secret) throw new Error("SHIPMATE_API_SECRET must be in .env to create the n8n credential");
+
+  const created = await api("POST", "/credentials", {
+    name: "shipmate-secret",
+    type: "httpHeaderAuth",
+    data: { name: "x-shipmate-secret", value: secret },
+  });
+  console.log(`created credential shipmate-secret (${created.id})\n`);
+
+  // Persist, so re-running does not pile up duplicates.
+  const line = `N8N_CREDENTIAL_ID=${created.id}`;
+  const current = fs.readFileSync(envFile, "utf-8");
+  fs.writeFileSync(
+    envFile,
+    /^N8N_CREDENTIAL_ID=/m.test(current)
+      ? current.replace(/^N8N_CREDENTIAL_ID=.*$/m, line)
+      : `${current.replace(/\s*$/, "")}\n${line}\n`,
+  );
+  return created.id;
+}
+
+/**
+ * Points every credential reference at something the instance actually has.
+ *
+ * `shipmate-secret` becomes the real id. `paytm-key` does not exist and has no value to
+ * create it from, so the reference is removed entirely rather than left pointing at a
+ * placeholder — the money-rail workflow imports without it and the node gets its
+ * credential attached by hand when Paytm is configured.
+ */
+function fixCredentials(wf, credentialId) {
+  let stripped = 0;
+  for (const node of wf.nodes) {
+    if (!node.credentials) continue;
+    for (const [type, cred] of Object.entries(node.credentials)) {
+      if (cred.name === "shipmate-secret") node.credentials[type] = { id: credentialId, name: "shipmate-secret" };
+      else { delete node.credentials[type]; stripped++; }
+    }
+    if (Object.keys(node.credentials).length === 0) delete node.credentials;
+  }
+  return stripped;
+}
+
 /** The webhook path a workflow listens on, if it has a webhook trigger. */
 function webhookPath(wf) {
   const node = wf.nodes.find((n) => n.type === "n8n-nodes-base.webhook");
@@ -114,12 +174,15 @@ async function main() {
   }
   console.log(`${existing.length} workflow(s) already there\n`);
 
+  const credentialId = await ensureCredential();
+
   const files = fs.readdirSync(path.join(root, "n8n")).filter((f) => f.endsWith(".json")).sort();
   const results = [];
 
   for (const file of files) {
     const raw = JSON.parse(fs.readFileSync(path.join(root, "n8n", file), "utf-8"));
     const { wf, missing } = substitute(raw, { SHIPMATE_BASE, PAYTM_MID });
+    const strippedCreds = fixCredentials(wf, credentialId);
     const match = existing.find((w) => w.name === wf.name);
     const isCallWorkflow = file.startsWith("01");
     const shouldActivate = isCallWorkflow || activateAll;
@@ -135,6 +198,7 @@ async function main() {
       // Paytm is configured anyway. Saying so is better than a silent `undefined` in a URL.
       console.log(`    NOT SET, left as $env: ${missing.join(", ")}`);
     }
+    if (strippedCreds) console.log(`    ${strippedCreds} credential ref(s) removed — attach by hand in the editor`);
     console.log(`    activate: ${shouldActivate ? "yes" : "no — import only"}`);
 
     if (!apply) {
