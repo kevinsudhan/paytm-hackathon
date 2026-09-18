@@ -101,15 +101,32 @@ const wrap = (fn: (req: Request, res: Response) => Promise<unknown>) =>
 
 // ---------------------------------------------------------------- health
 
+/** When this process started. An empty store means a restart, not necessarily a deploy. */
+const STARTED_AT = new Date().toISOString();
+
 app.get("/health", wrap(async (_req, res) => {
   const mem = await memory.health();
   res.json({
     ok: true,
     service: "shipmate",
+    /**
+     * Which build is actually serving.
+     *
+     * Without this, "is my fix live?" is answered by guessing from side effects — an empty
+     * commitment store was read as a fresh deploy when it was only a restart, and a fix
+     * that worked locally looked broken in production for the wrong reason. Render sets
+     * these; locally they are absent and it says so.
+     */
+    build: {
+      commit: process.env.RENDER_GIT_COMMIT?.slice(0, 7) ?? "local",
+      branch: process.env.RENDER_GIT_BRANCH ?? null,
+      startedAt: STARTED_AT,
+    },
     commitments: store.allCommitments().length,
     open: store.openCommitments().length,
     twins: store.allTwins().length,
     autonomy: ledger.autonomyRate(),
+    ingested: store.processedCount(),
     memory: mem,
   });
 }));
