@@ -18,7 +18,7 @@ import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
 import {
   createCommitment, type Commitment, type Dependency, type Owner,
 } from "../domain/commitment.js";
-import { createTwin, type StateName, type Twin } from "../domain/twin.js";
+import { createTwin, STATE_ORDER, type StateName, type Twin } from "../domain/twin.js";
 import { putCommitment, putTwin, getTwin, alreadyProcessed, markProcessed } from "./store.js";
 import { remember, type MemoryItem } from "../memory/cognee.js";
 
@@ -126,10 +126,7 @@ const ExtractionSchema = z.object({
     "YYYY-MM-DD if a booking cut-off was stated, else empty string. This is a hard date a " +
     "port will enforce — record it exactly as said and never estimate one.",
   ),
-  stage: z.enum([
-    "booking", "docs", "customs", "container", "gate_in",
-    "vessel", "transit", "arrival", "delivery", "closed",
-  ]).describe("Which stage of the shipment this call was about"),
+  stage: z.enum(STATE_ORDER).describe("Which stage of the shipment this call was about"),
   summary: z.string().describe("Two sentences on what the call was actually about"),
   commitments: z.array(z.object({
     what: z.string().describe("The promise, in one line, as a human would write it"),

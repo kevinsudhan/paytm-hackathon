@@ -1,0 +1,943 @@
+/*
+ * Araxys Builder — the page.
+ *
+ * Plain JS, no build step. Everything a model produced (labels, reasons, file contents)
+ * is untrusted and goes through esc() before it touches innerHTML.
+ */
+"use strict";
+
+const $ = (sel, el = document) => el.querySelector(sel);
+const $$ = (sel, el = document) => [...el.querySelectorAll(sel)];
+
+const S = {
+  mode: "fork",
+  status: null,
+  template: null,
+  run: null,
+  extendRun: null,
+  tab: "overview",
+  file: null,
+  pollTimer: null,
+  statusTimer: null,
+  sessionTokens: {},
+  extendBusy: false,
+  build: null,
+  buildTab: "lifecycle",
+  apps: {},
+};
+
+const RUNNING = new Set(["REQUEST_RECEIVED", "READING_TEMPLATE", "DRAFTING"]);
+
+const EXAMPLES = {
+  fork: [
+    ["Dental clinic", "A dental clinic in Chennai. Patients phone in to book, reschedule or cancel appointments with a dentist; the clinic sends reminders the day before and follows up after treatment. Some treatments need a lab (crowns, dentures)."],
+    ["Physiotherapy centre", "A physiotherapy centre. Patients call to book a first assessment, then a course of sessions with a therapist; missed sessions are followed up, and insurance pre-approval is needed for some courses."],
+    ["Hair salon", "A hair and beauty salon. Customers book by phone with a stylist for a service; the salon confirms the day before, takes a deposit for colour treatments, and sends a rebooking reminder six weeks later."],
+    ["Vet clinic", "A veterinary clinic. Pet owners phone to book consultations and vaccinations; the clinic tracks each pet's vaccination schedule, sends reminders when a booster is due, and refers some cases to a specialist hospital."],
+  ],
+  extend: [
+    ["Delay alerts", "Alert the customer automatically when a shipment is delayed more than three days past its sailing date."],
+    ["Volume rebate", "Add a rebate for customers based on the shipment volume they book each quarter."],
+  ],
+};
+
+// ------------------------------------------------------------------------ helpers
+
+function esc(v) {
+  return String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+async function api(path, opts = {}) {
+  const r = await fetch(path, {
+    ...opts,
+    headers: { "Content-Type": "application/json", ...(opts.headers || {}) },
+  });
+  let body = null;
+  try { body = await r.json(); } catch { /* empty */ }
+  if (!r.ok) throw new Error((body && body.error) || `HTTP ${r.status}`);
+  return body;
+}
+
+const post = (path, body) => api(path, { method: "POST", body: JSON.stringify(body || {}) });
+
+function shortModel(id) {
+  if (!id) return "";
+  return String(id).split("/").pop().replace(/:free$/, "");
+}
+
+function fmt(n) {
+  return Number(n || 0).toLocaleString();
+}
+
+function since(iso) {
+  const s = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 1000));
+  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, "0")}s`;
+}
+
+function store(key, value) {
+  try {
+    if (value === undefined) return localStorage.getItem(key);
+    localStorage.setItem(key, value);
+  } catch { /* storage unavailable */ }
+  return null;
+}
+
+// -------------------------------------------------------------------- model label
+
+async function loadStatus(refresh = false) {
+  try {
+    S.status = await api(`/api/status${refresh ? "?refresh=1" : ""}`);
+  } catch (e) {
+    S.status = { error: e.message };
+  }
+  renderModel();
+}
+
+function renderModel() {
+  const st = S.status;
+  const dot = $("#model-dot");
+  const name = $("#model-name");
+  const via = $("#model-via");
+  const tag = $("#model-tag");
+  dot.className = "dot";
+
+  if (!st || st.error) {
+    dot.classList.add("bad");
+    name.textContent = "builder offline";
+    via.textContent = "";
+    tag.hidden = true;
+    return;
+  }
+
+  const reachable = st.gatewayUp && st.gatewayAuthorised;
+  const gw = st.gatewayName === "kilo" ? "Kilo" : st.gatewayName === "omniroute" ? "OmniRoute" : st.gatewayName;
+  const isFree = (id) => /(:free|\/free)$/.test(id || "") && !(st.notFree || []).includes(id);
+
+  if (st.inFlight) {
+    dot.classList.add("busy");
+    name.textContent = shortModel(st.inFlight.model);
+    via.textContent = `drafting · ${since(st.inFlight.since)}`;
+    tag.hidden = !isFree(st.inFlight.model);
+  } else if (st.last) {
+    dot.classList.add(reachable ? "ok" : "bad");
+    name.textContent = shortModel(st.last.resolvedModel);
+    via.textContent = `via ${st.last.backend === "anthropic" ? "Anthropic (paid)" : gw}`;
+    tag.hidden = !(st.last.backend !== "anthropic" && isFree(st.last.usedModel));
+  } else {
+    dot.classList.add(reachable ? "ok" : "bad");
+    name.textContent = st.ladder && st.ladder[0] ? shortModel(st.ladder[0]) : "none";
+    via.textContent = reachable ? `ready · ${gw}` : `${gw} unreachable`;
+    tag.hidden = !isFree(st.ladder && st.ladder[0]);
+  }
+  $("#model-pill").title = reachable ? "" : "The model gateway is not answering or rejects the key";
+
+  // Popover
+  $("#pop-gateway").textContent = `${gw} · ${st.gateway} · ${reachable ? "reachable" : st.gatewayUp ? "rejects the key" : "unreachable"}`;
+  const current = st.inFlight ? st.inFlight.model : st.last ? st.last.usedModel : null;
+  $("#pop-ladder").innerHTML = (st.ladder || [])
+    .map((m, i) => `<li class="${m === current ? "current" : ""}"><span class="n">${i + 1}</span><span class="grow">${esc(m)}</span>${isFree(m) ? '<span class="tag">free</span>' : '<span class="badge warn">not free</span>'}</li>`)
+    .join("");
+  const foot = [];
+  foot.push(st.paidFallback ? "Paid fallback is ON — Anthropic is used if every free model fails." : "Free models only — no paid fallback.");
+  if (st.last) foot.push(`Last call: ${shortModel(st.last.resolvedModel)}, ${fmt(st.last.usage.input)} in / ${fmt(st.last.usage.output)} out.`);
+  if ((st.notFree || []).length) foot.push(`Not listed as free right now: ${st.notFree.join(", ")}.`);
+  $("#pop-foot").textContent = foot.join(" ");
+}
+
+function toggleModelPopover(show) {
+  const pop = $("#model-popover");
+  const open = show ?? pop.hidden;
+  pop.hidden = !open;
+  $("#model-pill").setAttribute("aria-expanded", String(open));
+}
+
+// ------------------------------------------------------------------------ template
+
+async function loadTemplate(refresh = false) {
+  try {
+    S.template = await api(`/api/template${refresh ? "?refresh=1" : ""}`);
+  } catch (e) {
+    $("#tpl-live").className = "badge bad";
+    $("#tpl-live").textContent = "unreadable";
+    $("#tpl-body").innerHTML = `<div class="callout bad small">${esc(e.message)}</div>`;
+    return;
+  }
+  const t = S.template;
+  const seen = Object.values(t.observed).filter(Boolean).length;
+  $("#tpl-live").className = `badge ${seen === 4 ? "ok" : "warn"}`;
+  $("#tpl-live").textContent = seen === 4 ? "live" : `${seen}/4 live`;
+  $("#tpl-label").textContent = "Araxys Logistics";
+
+  const onOff = (v) => (v === null ? '<span class="dot" title="not read"></span>' : `<span class="dot ${v ? "ok" : ""}" title="${v ? "on" : "off"}"></span>`);
+  $("#tpl-body").innerHTML = `
+    <div class="tpl-section">
+      <h4><span>Lifecycle</span><span>${t.lifecycle.length}</span></h4>
+      <div class="flow">${t.lifecycle.map((s, i) => `${i ? '<span class="arrow">›</span>' : ""}<span class="st">${esc(s)}</span>`).join("")}</div>
+    </div>
+    <div class="tpl-section">
+      <h4><span>CRM tables</span><span>${t.observed.schema ? t.tables.length : "?"}</span></h4>
+      <ul class="tpl-list">${t.tables.map((x) => `<li title="${esc(x.note)}"><span class="name">${esc(x.name)}</span><span class="grow"></span><span class="muted">${x.columns} cols</span></li>`).join("")}</ul>
+    </div>
+    <div class="tpl-section">
+      <h4><span>Voice agents</span><span>${t.agents.length}</span></h4>
+      <ul class="tpl-list">${t.agents.map((a) => `<li title="${esc(a.role)}">${onOff(a.wired)}<span class="name">${esc(a.name)}</span><span class="grow"></span><span class="muted">${a.knowledgeSources ?? "?"} KB</span></li>`).join("")}</ul>
+    </div>
+    <div class="tpl-section">
+      <h4><span>n8n workflows</span><span>${t.workflows.filter((w) => w.active).length}/${t.workflows.length} on</span></h4>
+      <ul class="tpl-list">${t.workflows.map((w) => `<li title="${esc(w.trigger)}">${onOff(w.active)}<span class="name">${esc(w.name.replace(/^SHIPMATE /, ""))}</span></li>`).join("")}</ul>
+    </div>
+    <div class="tpl-section">
+      <h4><span>Memory</span></h4>
+      <ul class="tpl-list"><li>${onOff(t.memory.reachable)}<span class="name">${esc(t.memory.dataset)}</span><span class="grow"></span><span class="muted">Cognee</span></li></ul>
+    </div>
+    <div class="muted small">Read ${new Date(t.readAt).toLocaleTimeString()} · <a href="#" id="tpl-refresh">refresh</a></div>`;
+  $("#tpl-refresh").addEventListener("click", (e) => { e.preventDefault(); loadTemplate(true); });
+}
+
+// ---------------------------------------------------------------------------- runs
+
+async function loadRuns() {
+  let runs = [];
+  try { runs = await api("/api/runs"); } catch { return; }
+  const el = $("#runs");
+  if (!runs.length) {
+    el.innerHTML = '<li class="muted small">None yet.</li>';
+    return;
+  }
+  el.innerHTML = runs
+    .map((r) => `<li><button type="button" data-run="${esc(r.runId)}" class="${S.run && S.run.runId === r.runId ? "active" : ""}">
+      <span class="r-title">${esc(r.label || r.request.slice(0, 60))}</span>
+      <span class="r-meta">${stateBadge(r.state)}<span>${new Date(r.startedAt).toLocaleTimeString()}</span></span>
+    </button></li>`)
+    .join("");
+}
+
+function stateBadge(state) {
+  const cls = { BUILT: "ok", WAITING_FOR_APPROVAL: "accent", APPROVED: "accent", FAILED: "bad", REJECTED: "", CLARIFICATION_REQUIRED: "warn", ANALYSIS_FAILED: "bad" }[state] ?? "warn";
+  const text = { WAITING_FOR_APPROVAL: "awaiting approval", CLARIFICATION_REQUIRED: "needs answers", ANALYSIS_FAILED: "failed" }[state] ?? state.toLowerCase().replace(/_/g, " ");
+  return `<span class="badge ${cls}">${esc(text)}</span>`;
+}
+
+async function openRun(id) {
+  S.build = null;
+  if (location.hash) history.replaceState(null, "", location.pathname);
+  try {
+    S.run = await api(`/api/runs/${encodeURIComponent(id)}`);
+  } catch (e) {
+    return toast(e.message);
+  }
+  if (S.run.mode === "extend") {
+    S.extendRun = S.run;
+    S.run = null;
+    setMode("extend", false);
+    renderExtend();
+    return;
+  }
+  setMode("fork", false);
+  S.tab = "overview";
+  S.file = null;
+  renderRun();
+  if (RUNNING.has(S.run.state)) startPolling();
+  loadRuns();
+}
+
+function startPolling() {
+  stopPolling();
+  S.pollTimer = setInterval(async () => {
+    if (!S.run) return stopPolling();
+    try {
+      S.run = await api(`/api/runs/${encodeURIComponent(S.run.runId)}`);
+    } catch { return; }
+    await loadStatus();
+    renderRun();
+    if (!RUNNING.has(S.run.state)) {
+      stopPolling();
+      loadRuns();
+    }
+  }, 1500);
+}
+
+function stopPolling() {
+  if (S.pollTimer) clearInterval(S.pollTimer);
+  S.pollTimer = null;
+}
+
+// ---------------------------------------------------------------------- fork run
+
+async function startFork() {
+  S.build = null;
+  const request = $("#request").value.trim();
+  if (request.length < 10) return toast("Describe the business in at least a sentence.");
+  const btn = $("#go");
+  btn.disabled = true;
+  try {
+    S.run = await post("/api/fork", { request, force: $("#force").checked });
+    S.tab = "overview";
+    S.file = null;
+    renderRun();
+    startPolling();
+    loadRuns();
+  } catch (e) {
+    toast(e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+const STEPS = ["Read template", "Draft", "Blueprint", "Approve", "Build"];
+const STEP_OF = { REQUEST_RECEIVED: 0, READING_TEMPLATE: 0, DRAFTING: 1, CLARIFICATION_REQUIRED: 2, BLUEPRINT_READY: 2, WAITING_FOR_APPROVAL: 3, APPROVED: 4, BUILT: 5 };
+
+function stepper(run) {
+  let cur = STEP_OF[run.state];
+  let failedAt = -1;
+  if (cur === undefined) {
+    // FAILED / REJECTED: the step that was running when it stopped.
+    const lastGood = [...run.history].reverse().find((h) => STEP_OF[h.state] !== undefined);
+    failedAt = lastGood ? Math.min(STEP_OF[lastGood.state] + (lastGood.state === "READING_TEMPLATE" || lastGood.state === "DRAFTING" ? 0 : 1), 4) : 0;
+    cur = failedAt;
+  }
+  const d = run.draft;
+  const bp = run.blueprint;
+  const drafting = run.history.find((h) => h.state === "DRAFTING");
+  const liveModel = S.status && S.status.inFlight ? shortModel(S.status.inFlight.model) : "";
+  const subs = [
+    run.template ? `${Object.values(run.template.observed).filter(Boolean).length}/4 sources live` : "",
+    run.state === "DRAFTING"
+      ? `${liveModel || "free model"} · ${drafting ? since(drafting.at) : ""}`
+      : d ? (d.cached ? "cache · 0 tokens" : `${fmt(d.usage.input + d.usage.output)} tokens`) : "",
+    bp ? `${bp.tally.CLONE} cloned · ${bp.tally.REUSE} reused` : run.state === "CLARIFICATION_REQUIRED" ? "questions first" : "",
+    run.approval ? `by ${run.approval.by}` : run.state === "WAITING_FOR_APPROVAL" ? "your decision" : "",
+    run.buildDir ? run.buildDir : "",
+  ];
+  return `<div class="stepper">${STEPS.map((label, i) => {
+    let cls = "";
+    if (failedAt === i) cls = run.state === "FAILED" ? "failed" : "";
+    else if (i < cur) cls = "done";
+    else if (i === cur && RUNNING.has(run.state)) cls = "active";
+    else if (i === cur && run.state !== "BUILT") cls = "active";
+    return `<div class="step ${cls}"><div class="bar"></div><div class="label">${label}</div><div class="sub" title="${esc(subs[i])}">${esc(subs[i])}</div></div>`;
+  }).join("")}</div>`;
+}
+
+function renderRun() {
+  const el = $("#run");
+  const run = S.run;
+  if (!run) { el.hidden = true; return; }
+  el.hidden = false;
+
+  const parts = [`<div class="card">${stepper(run)}</div>`];
+
+  if (RUNNING.has(run.state)) {
+    const what = run.state === "DRAFTING"
+      ? "Drafting the delta against the template with a free model. This usually takes one to two minutes."
+      : "Reading the logistics system — schema, workflows, agents and memory.";
+    parts.push(`<div class="callout info"><div style="display:flex;gap:10px;align-items:center"><span class="spinner"></span><span>${esc(what)}</span></div></div>`);
+  }
+
+  if (run.state === "FAILED") {
+    const d = run.draft;
+    parts.push(`<div class="callout bad">
+      <div class="callout-title">This run stopped</div>
+      <div>${esc(run.error)}</div>
+      ${d && d.problems && d.problems.length ? `<ul>${d.problems.map((p) => `<li>${esc(p)}</li>`).join("")}</ul>` : ""}
+      ${d && d.calls && d.calls.length ? `<div class="small muted">${d.calls.map((c) => `${esc(c.purpose)}: ${esc(shortModel(c.resolvedModel))} (${fmt(c.usage.input)} in / ${fmt(c.usage.output)} out)`).join(" · ")}</div>` : ""}
+      ${d && d.raw ? `<details><summary>What the model returned</summary><pre class="code">${esc(d.raw)}</pre></details>` : ""}
+    </div>`);
+  }
+
+  if (run.state === "CLARIFICATION_REQUIRED" && run.draft && run.draft.spec) {
+    const qs = run.draft.spec.openQuestions;
+    parts.push(`<div class="card">
+      <div class="card-head"><div><div class="eyebrow">Before anything is planned</div><h2>These change what gets built</h2></div></div>
+      <ul class="qlist">${qs.filter((q) => q.blocks === "structure").map((q) => `<li><span class="badge warn">structure</span><span>${esc(q.question)}</span></li>`).join("")}</ul>
+      <textarea id="answers" rows="3" style="margin-top:12px" placeholder="Answer in your own words — one line per question is fine."></textarea>
+      <div class="composer-foot" style="margin-top:10px">
+        <span class="muted small">Answers are folded into the request and drafted again. Unchanged requests come from cache for free.</span>
+        <div class="grow"></div>
+        <button class="btn" id="clarify-skip" type="button">Proceed with assumptions</button>
+        <button class="btn primary" id="clarify-go" type="button">Answer and re-draft</button>
+      </div>
+    </div>`);
+  }
+
+  if (run.blueprint) parts.push(renderBlueprint(run));
+
+  el.innerHTML = parts.join("");
+  bindRun();
+  bindAppControls(renderRun);
+
+  // Session token tally: count each fresh draft once.
+  if (run.draft && !run.draft.cached && !(run.runId in S.sessionTokens)) {
+    S.sessionTokens[run.runId] = run.draft.usage.input + run.draft.usage.output;
+    $("#session-tokens-n").textContent = fmt(Object.values(S.sessionTokens).reduce((a, b) => a + b, 0));
+  }
+}
+
+function renderBlueprint(run) {
+  const bp = run.blueprint;
+  const d = run.draft;
+  const spec = d.spec;
+  const v = spec.vertical;
+  const models = [...new Set(d.calls.map((c) => shortModel(c.resolvedModel)))].join(" → ");
+  const tokens = d.usage.input + d.usage.output;
+
+  const tabs = [
+    ["overview", "Overview", bp.items.length],
+    ["lifecycle", "Lifecycle & policy", v.lifecycle.order.length],
+    ["data", "Data", spec.entities.length],
+    ["agents", "Agents", spec.agents.length],
+    ["workflows", "Workflows", bp.items.filter((i) => i.area === "workflow" && i.verdict === "CLONE").length],
+    ["files", run.buildDir ? "Built files" : "Files", bp.files.length],
+  ];
+
+  let panel = "";
+  if (S.tab === "overview") panel = overviewPanel(run);
+  else if (S.tab === "lifecycle") panel = lifecyclePanel(spec);
+  else if (S.tab === "data") panel = dataPanel(run);
+  else if (S.tab === "agents") panel = agentsPanel(run);
+  else if (S.tab === "workflows") panel = workflowsPanel(run);
+  else panel = filesPanel(run);
+
+  return `<section class="card hero">
+    <div class="hero-top">
+      <div>
+        <div class="eyebrow">Blueprint · ${esc(v.id)}</div>
+        <h2>${esc(v.label)}</h2>
+        <div class="muted small">${esc(v.business.name)} · ${esc(v.business.currency)} · ${esc(v.business.timezone)} · built from the Araxys Logistics template</div>
+      </div>
+      ${stateBadge(run.state)}
+    </div>
+    <div class="stats">
+      <div class="stat"><div class="v">${bp.tally.REUSE}</div><div class="l">Reused</div></div>
+      <div class="stat"><div class="v">${bp.tally.CLONE}</div><div class="l">Cloned</div></div>
+      <div class="stat"><div class="v">${bp.tally.NEW}</div><div class="l">New</div></div>
+      <div class="stat"><div class="v">${bp.tally.NEEDS_PERSON}</div><div class="l">Needs a person</div></div>
+      <div class="stat"><div class="v">${d.cached ? "0" : fmt(tokens)}</div><div class="l">${d.cached ? "Tokens · draft cached" : `${fmt(d.usage.input)} in${d.usage.cacheRead ? ` (${fmt(d.usage.cacheRead)} cached)` : ""} / ${fmt(d.usage.output)} out`}</div></div>
+      <div class="stat wide"><div class="model">${esc(models || "cache")}</div><div class="l">${d.cached ? "Drafted earlier, served from cache" : `Drafted in ${d.calls.length} call${d.calls.length === 1 ? "" : "s"} · free`}</div></div>
+    </div>
+    <div class="tabs" role="tablist">${tabs.map(([id, label, n]) => `<button role="tab" data-tab="${id}" aria-selected="${S.tab === id}">${label}<span class="count">${n}</span></button>`).join("")}</div>
+    <div class="tab-panel">${panel}</div>
+  </section>
+  ${approvalBar(run)}`;
+}
+
+function item(i) {
+  const from = i.from ? `<span class="from">${esc(i.from)}</span><span class="muted">→</span>` : "";
+  const changes = (i.changes || []).length ? `<div class="changes">${i.changes.map((c) => `<span>${esc(c)}</span>`).join("")}</div>` : "";
+  return `<div class="item"><span class="v-badge v-${esc(i.verdict)}">${esc(i.verdict.replace("_", " "))}</span>
+    <div><div class="map">${from}<b>${esc(i.to)}</b></div><div class="why">${esc(i.why)}</div>${changes}</div></div>`;
+}
+
+function group(title, list) {
+  if (!list.length) return "";
+  return `<div class="group"><h3>${esc(title)}</h3><div class="items">${list.map(item).join("")}</div></div>`;
+}
+
+function overviewPanel(run) {
+  const bp = run.blueprint;
+  const d = run.draft;
+  const q = d.spec.openQuestions;
+  const out = [];
+  if (bp.warnings.length) {
+    out.push(`<div class="callout warn"><div class="callout-title">Read before approving</div><ul>${bp.warnings.map((w) => `<li>${esc(w)}</li>`).join("")}</ul></div>`);
+  }
+  if (q.length) {
+    out.push(`<div class="callout info"><div class="callout-title">Still open</div><ul class="qlist">${q.map((x) => `<li><span class="badge ${x.blocks === "structure" ? "warn" : ""}">${esc(x.blocks)}</span><span>${esc(x.question)}</span></li>`).join("")}</ul></div>`);
+  }
+  out.push(group("Kernel — reused unchanged", bp.items.filter((i) => i.area === "kernel")));
+  out.push(group("Engines", bp.items.filter((i) => i.area === "engine")));
+  out.push(group("Memory", bp.items.filter((i) => i.area === "memory")));
+  if (d.repaired && d.repaired.length) {
+    out.push(`<details><summary>Needed one repair call — what the first answer got wrong</summary><ul class="small">${d.repaired.map((n) => `<li>${esc(n)}</li>`).join("")}</ul></details>`);
+  }
+  if (d.normalised && d.normalised.length) {
+    out.push(`<details><summary>${d.normalised.length} slip${d.normalised.length === 1 ? "" : "s"} fixed in code, at zero tokens</summary><ul class="small">${d.normalised.map((n) => `<li>${esc(n)}</li>`).join("")}</ul></details>`);
+  }
+  return out.join("");
+}
+
+function lifecyclePanel(spec) {
+  const v = spec.vertical;
+  const held = v.policy.alwaysApprove || {};
+  const order = v.lifecycle.order;
+  const back = [];
+  const states = order.map((s, i) => {
+    const st = v.lifecycle.states[s] || { label: s, requirements: [], actions: [], next: [] };
+    for (const n of st.next) if (order.indexOf(n) < i) back.push(`${s} → ${n}`);
+    return `<div class="state ${s === v.lifecycle.initial ? "initial" : ""}">
+      <span class="s-step">${i + 1}</span>
+      <div class="s-name">${esc(s)}</div>
+      <div class="s-label">${esc(st.label)}</div>
+      ${st.requirements.length ? `<ul class="req">${st.requirements.map((r) => `<li>${esc(r)}</li>`).join("")}</ul>` : ""}
+      <div class="acts">${st.actions.map((a) => `<span class="act ${a in held ? "held" : ""}" title="${a in held ? "always needs a person" : ""}">${esc(a)}</span>`).join("")}</div>
+      <div class="next">${st.next.length ? `→ ${st.next.map(esc).join(", ")}` : "terminal"}</div>
+    </div>`;
+  }).join("");
+
+  const always = Object.entries(held).map(([a, r]) => `<li><span class="act held">${esc(a)}</span> — ${esc(r.why)} <span class="badge">${esc(r.approver)}</span></li>`).join("");
+  const thresholds = (v.policy.thresholds || []).map((t) => `<li><span class="act">${t.actions.map(esc).join(" / ")}</span> — ${t.measure === "amount" ? `${esc(v.business.currencySymbol)}${fmt(t.limit)}` : `${fmt(t.limit)}% discount`} ${t.trigger === "atOrAbove" ? "or more" : "exceeded"} needs <span class="badge">${esc(t.approver)}</span></li>`).join("");
+
+  return `<div class="group"><h3>Lifecycle — the twin runs this</h3><div class="lifecycle">${states}</div>
+      ${back.length ? `<div class="muted small" style="margin-top:8px">Backward edges: ${back.map(esc).join(", ")}</div>` : ""}</div>
+    <div class="group"><h3>Policy gate</h3>
+      <ul class="policy">${always || '<li class="muted">No action is always held.</li>'}${thresholds}</ul>
+    </div>`;
+}
+
+function fileContent(run, path) {
+  const f = run.blueprint.files.find((x) => x.path === path);
+  return f ? f.content : "";
+}
+
+function dataPanel(run) {
+  const bp = run.blueprint;
+  return `${group("Tables", bp.items.filter((i) => i.area === "entity"))}
+    <div class="group"><h3>schema.sql</h3>${codeBlock(fileContent(run, "schema.sql"), "sql")}</div>`;
+}
+
+function agentsPanel(run) {
+  const bp = run.blueprint;
+  const prompts = bp.files.filter((f) => f.path.endsWith(".prompt.md"));
+  return `${group("Voice agents", bp.items.filter((i) => i.area === "agent"))}
+    <div class="callout warn small">Agents are not created automatically — a new agent answers real callers. Create each one by hand on a sandbox number first.</div>
+    ${prompts.map((f) => `<div class="group"><h3>${esc(f.path)}</h3>${codeBlock(f.content, "md")}</div>`).join("")}`;
+}
+
+function workflowsPanel(run) {
+  const bp = run.blueprint;
+  return `${group("n8n workflows", bp.items.filter((i) => i.area === "workflow"))}
+    <div class="muted small">Cloned workflows listen on their own webhook paths, so they can never answer the template's calls. They are written switched off.</div>`;
+}
+
+function filesPanel(run) {
+  return filesView(run.blueprint.files, run.buildDir);
+}
+
+function filesView(files, buildDir) {
+  if (!S.file || !files.some((f) => f.path === S.file)) S.file = files[0] && files[0].path;
+  const f = files.find((x) => x.path === S.file);
+  const kind = { config: "cfg", sql: "sql", agent: "agent", workflow: "n8n", memory: "mem", doc: "doc" };
+  const ext = (p) => (p.endsWith(".sql") ? "sql" : p.endsWith(".json") ? "json" : p.endsWith(".md") ? "md" : "ts");
+  const bname = buildDir ? buildDir.split("/").pop() : "";
+  return `${buildDir ? `<div class="callout ok"><div class="callout-title">Written to ${esc(buildDir)}/</div><div class="small">Nothing was applied to a live system. BUILD.md lists the deploy steps in order. The business also runs as its own app:</div><div>${appControl(bname)}</div></div>` : `<div class="muted small">A preview — nothing is written until the blueprint is approved.</div>`}
+    <div class="files">
+      <div class="file-list">${files.map((x) => `<button type="button" data-file="${esc(x.path)}" class="${x.path === S.file ? "active" : ""}"><span class="file-kind">${kind[x.kind] || x.kind}</span><span>${esc(x.path)}</span></button>`).join("")}</div>
+      <div class="viewer">
+        <div class="viewer-head"><span class="grow">${esc(f ? f.path : "")}</span><span class="muted">${f ? fmt(f.content.split("\n").length) : 0} lines</span><button class="btn ghost small" id="copy-file" type="button">Copy</button></div>
+        ${f ? codeBlock(f.content, ext(f.path), true) : ""}
+      </div>
+    </div>`;
+}
+
+/** Light highlighting, applied after escaping so it can only add spans to safe text. */
+function codeBlock(text, lang, tall = false) {
+  let html = esc(text);
+  if (lang === "sql") {
+    html = html.replace(/^(--.*)$/gm, '<span class="c">$1</span>')
+      .replace(/\b(create table if not exists|alter table|enable row level security|primary key|not null|default|generated always as identity)\b/g, '<span class="k">$1</span>');
+  } else if (lang === "json") {
+    html = html.replace(/(&quot;[^&\n]*?&quot;)(\s*:)/g, '<span class="k">$1</span>$2');
+  } else if (lang === "md") {
+    html = html.replace(/^(#{1,3} .*)$/gm, '<span class="k">$1</span>');
+  } else {
+    html = html.replace(/^(\s*(?:\/\*\*|\*|\/\/).*)$/gm, '<span class="c">$1</span>');
+  }
+  return `<pre class="code"${tall ? ' style="max-height:none;height:100%"' : ""}>${html}</pre>`;
+}
+
+function approvalBar(run) {
+  if (run.state === "WAITING_FOR_APPROVAL") {
+    const name = store("builder.approver") || "";
+    return `<div class="approval">
+      <div class="grow"><b>Approve this blueprint?</b><div class="note">Approving writes the files to builds/. Nothing reaches a live database, phone line or workflow.</div></div>
+      <input type="text" id="approver" placeholder="Your name" value="${esc(name)}" aria-label="Approver name" />
+      <button class="btn danger" id="reject" type="button">Reject</button>
+      <button class="btn primary" id="approve" type="button">Approve & build</button>
+    </div>`;
+  }
+  if (run.state === "APPROVED") {
+    return `<div class="approval"><div class="grow"><b>Approved by ${esc(run.approval.by)}</b><div class="note">Not built yet.</div></div><button class="btn primary" id="build" type="button">Build files</button></div>`;
+  }
+  return "";
+}
+
+function bindRun() {
+  $$("#run [data-tab]").forEach((b) => b.addEventListener("click", () => { S.tab = b.dataset.tab; renderRun(); }));
+  $$("#run [data-file]").forEach((b) => b.addEventListener("click", () => { S.file = b.dataset.file; renderRun(); }));
+  const copy = $("#copy-file");
+  if (copy) copy.addEventListener("click", async () => {
+    try { await navigator.clipboard.writeText(fileContent(S.run, S.file)); copy.textContent = "Copied"; } catch { copy.textContent = "Copy failed"; }
+  });
+  const approve = $("#approve");
+  if (approve) approve.addEventListener("click", () => decide(true));
+  const reject = $("#reject");
+  if (reject) reject.addEventListener("click", () => decide(false));
+  const build = $("#build");
+  if (build) build.addEventListener("click", buildRun);
+  const go = $("#clarify-go");
+  if (go) go.addEventListener("click", () => clarify(false));
+  const skip = $("#clarify-skip");
+  if (skip) skip.addEventListener("click", () => clarify(true));
+}
+
+async function decide(approve) {
+  const by = ($("#approver") && $("#approver").value.trim()) || "";
+  if (!by) return toast("Add your name — approval is recorded with it.");
+  store("builder.approver", by);
+  try {
+    S.run = await post(`/api/fork/${encodeURIComponent(S.run.runId)}/decide`, { approve, by });
+    if (approve) return buildRun();
+    renderRun();
+    loadRuns();
+  } catch (e) { toast(e.message); }
+}
+
+async function buildRun() {
+  try {
+    S.run = await post(`/api/fork/${encodeURIComponent(S.run.runId)}/build`, {});
+    S.tab = "files";
+    S.file = "BUILD.md";
+    await loadApps();
+    renderRun();
+    loadRuns();
+    loadBuilds();
+  } catch (e) { toast(e.message); }
+}
+
+async function clarify(force) {
+  const answers = ($("#answers") && $("#answers").value) || "";
+  if (!force && !answers.trim()) return toast("Answer the questions, or proceed with assumptions.");
+  try {
+    S.run = await post(`/api/fork/${encodeURIComponent(S.run.runId)}/clarify`, { answers, force: force || undefined });
+    renderRun();
+    startPolling();
+    loadRuns();
+  } catch (e) { toast(e.message); }
+}
+
+// -------------------------------------------------------------------------- builds
+
+async function loadApps() {
+  try { S.apps = await api("/api/apps"); } catch { S.apps = {}; }
+}
+
+/**
+ * Launch / open for one build's app. The app is its own process on its own port — the
+ * builder starts it and links to it, and never shows it inside this page.
+ */
+function appControl(name) {
+  const a = S.apps[name] || {};
+  if (a.running) {
+    return `<span class="app-ctl"><a class="btn primary small" href="${esc(a.url)}" target="_blank" rel="noopener">Open app ↗</a><span class="mono small muted">${esc(a.url)}</span></span>`;
+  }
+  if (a.hasApp === false) {
+    return `<span class="muted small">Built before apps existed — rebuild to get a runnable app.</span>`;
+  }
+  return `<button class="btn primary small" type="button" data-launch="${esc(name)}">Launch app</button>`;
+}
+
+function bindAppControls(rerender) {
+  $$("[data-launch]").forEach((b) => b.addEventListener("click", async () => {
+    const name = b.dataset.launch;
+    b.disabled = true;
+    b.innerHTML = '<span class="spinner"></span> Starting…';
+    try {
+      const st = await post(`/api/builds/${encodeURIComponent(name)}/launch`, {});
+      S.apps[name] = { ...(S.apps[name] || {}), ...st, hasApp: true };
+      if (st.url) window.open(st.url, "_blank", "noopener");
+    } catch (e) {
+      toast(e.message);
+    }
+    rerender();
+    loadBuilds();
+  }));
+}
+
+async function loadBuilds() {
+  let builds = [];
+  try { builds = await api("/api/builds"); } catch { return; }
+  await loadApps();
+  const el = $("#builds");
+  if (!builds.length) {
+    el.innerHTML = '<li class="muted small">Nothing built yet.</li>';
+    return;
+  }
+  el.innerHTML = builds
+    .map((b) => `<li><button type="button" data-build="${esc(b.name)}" class="${S.build && S.build.name === b.name ? "active" : ""}">
+      <span class="r-title">${esc(b.business || b.label)}</span>
+      <span class="r-meta"><span class="badge ok">${esc(b.id)}</span>${S.apps[b.name] && S.apps[b.name].running ? `<span class="badge accent">live :${S.apps[b.name].port}</span>` : ""}<span>${b.states ?? "?"} states</span><span>${new Date(b.builtAt).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}</span></span>
+    </button></li>`)
+    .join("");
+}
+
+async function openBuild(name) {
+  try {
+    S.build = await api(`/api/builds/${encodeURIComponent(name)}`);
+    await loadApps();
+  } catch (e) {
+    return toast(e.message);
+  }
+  stopPolling();
+  S.run = null;
+  S.extendRun = null;
+  S.buildTab = "lifecycle";
+  S.file = null;
+  if (location.hash !== `#build/${name}`) history.replaceState(null, "", `#build/${name}`);
+  setMode("fork", false);
+  renderBuild();
+  loadBuilds();
+  $("#run").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function buildFile(path) {
+  const f = S.build.files.find((x) => x.path === path);
+  return f ? f.content : "";
+}
+
+function workflowRow(f) {
+  let wf = { name: f.path, nodes: [] };
+  try { wf = JSON.parse(f.content); } catch { /* shown by path */ }
+  const nodes = wf.nodes || [];
+  const hooks = nodes.filter((n) => String(n.type).endsWith(".webhook")).map((n) => `/webhook/${n.parameters && n.parameters.path}`);
+  const trig = nodes.find((n) => /webhook$|Trigger$/.test(String(n.type)));
+  const from = wf.meta && wf.meta.builtFrom ? ` · from ${esc(wf.meta.builtFrom)}` : "";
+  return `<div class="item"><span class="v-badge v-CLONE">CLONE</span><div>
+    <div class="map"><b>${esc(wf.name)}</b></div>
+    <div class="why">${esc(trig ? String(trig.type).split(".").pop() : "manual")} · ${nodes.length} nodes${from}</div>
+    ${hooks.length ? `<div class="changes">${hooks.map((h) => `<span>${esc(h)}</span>`).join("")}</div>` : ""}
+  </div></div>`;
+}
+
+function agentBlock(f) {
+  let cfg = {};
+  try { cfg = JSON.parse(buildFile(f.path.replace(/\.prompt\.md$/, ".agent.json"))); } catch { /* optional */ }
+  return `<div class="group"><h3>${esc(cfg.name || f.path)}${cfg.clonedFrom ? ` <span class="muted">· cloned from ${esc(cfg.clonedFrom)}</span>` : ""}</h3>
+    ${cfg.greeting ? `<div class="callout info small"><b>Greeting</b> — ${esc(cfg.greeting)}</div>` : ""}
+    ${codeBlock(f.content, "md")}</div>`;
+}
+
+function renderBuild() {
+  const b = S.build;
+  const el = $("#run");
+  el.hidden = false;
+  const v = b.vertical;
+  if (!v) {
+    el.innerHTML = `<div class="callout bad">${esc(b.buildDir)} has no readable vertical.json.</div>`;
+    return;
+  }
+  const files = b.files;
+  const sql = buildFile("schema.sql");
+  const tables = [...sql.matchAll(/create table if not exists public\.([a-z0-9_]+)/g)].map((m) => m[1]);
+  const prompts = files.filter((f) => f.path.endsWith(".prompt.md"));
+  const flows = files.filter((f) => f.path.startsWith("n8n/"));
+  let memory = {};
+  try { memory = JSON.parse(buildFile("memory.json")); } catch { /* optional */ }
+  const held = Object.keys(v.policy.alwaysApprove || {});
+
+  const tabs = [
+    ["lifecycle", "Lifecycle & policy", v.lifecycle.order.length],
+    ["agents", "Agents", prompts.length],
+    ["data", "Data", tables.length],
+    ["workflows", "Workflows", flows.length],
+    ["files", "Files", files.length],
+    ["deploy", "Deploy", ""],
+  ];
+
+  let panel = "";
+  if (S.buildTab === "lifecycle") panel = lifecyclePanel({ vertical: v });
+  else if (S.buildTab === "agents") {
+    panel = `<div class="callout warn small">These agents exist as prompts and config only. Create each one by hand on a sandbox number before it answers a real caller.</div>` + prompts.map(agentBlock).join("");
+  } else if (S.buildTab === "data") {
+    panel = `<div class="group"><h3>Tables</h3><div class="flow">${tables.map((t) => `<span class="st">${esc(t)}</span>`).join("")}</div></div>
+      <div class="group"><h3>schema.sql</h3>${codeBlock(sql, "sql")}</div>`;
+  } else if (S.buildTab === "workflows") {
+    panel = `<div class="items">${flows.map(workflowRow).join("")}</div>
+      <div class="muted small">Written switched off. Import through n8n; on n8n Cloud replace <code>{{ $env.SHIPMATE_BASE }}</code> first.</div>`;
+  } else if (S.buildTab === "files") {
+    panel = filesView(files, b.buildDir);
+  } else {
+    panel = codeBlock(buildFile("BUILD.md"), "md");
+  }
+
+  el.innerHTML = `<section class="card hero">
+    <div class="hero-top">
+      <div>
+        <div class="eyebrow">Built business · ${esc(v.id)}</div>
+        <h2>${esc(v.business.name)}</h2>
+        <div class="muted small">${esc(v.label)} · ${esc(v.business.currency)} · ${esc(v.business.timezone)} · ${esc(b.buildDir)}/ · built ${new Date(b.builtAt).toLocaleString()}</div>
+      </div>
+      <div class="hero-actions">${appControl(b.name)}<span class="badge ok">built</span></div>
+    </div>
+    <div class="stats">
+      <div class="stat"><div class="v">${v.lifecycle.order.length}</div><div class="l">Lifecycle states</div></div>
+      <div class="stat"><div class="v">${v.actions.length}</div><div class="l">Actions</div></div>
+      <div class="stat"><div class="v">${held.length}</div><div class="l">Always need a person</div></div>
+      <div class="stat"><div class="v">${tables.length}</div><div class="l">Tables</div></div>
+      <div class="stat"><div class="v">${prompts.length}</div><div class="l">Voice agents</div></div>
+      <div class="stat"><div class="v">${flows.length}</div><div class="l">Workflows</div></div>
+      <div class="stat wide"><div class="model">${esc(memory.dataset || "—")}</div><div class="l">Memory dataset (Cognee)</div></div>
+    </div>
+    <div class="callout info small">The business as built: config, schema, agent prompts and workflows on disk. Nothing has been deployed — the Deploy tab lists the steps, and each one reaches a live system.</div>
+    <div class="tabs" role="tablist">${tabs.map(([id, label, n]) => `<button role="tab" data-btab="${id}" aria-selected="${S.buildTab === id}">${label}<span class="count">${n}</span></button>`).join("")}</div>
+    <div class="tab-panel">${panel}</div>
+  </section>`;
+
+  $$("#run [data-btab]").forEach((x) => x.addEventListener("click", () => { S.buildTab = x.dataset.btab; renderBuild(); }));
+  bindAppControls(renderBuild);
+  $$("#run [data-file]").forEach((x) => x.addEventListener("click", () => { S.file = x.dataset.file; renderBuild(); }));
+  const copy = $("#copy-file");
+  if (copy) copy.addEventListener("click", async () => {
+    try { await navigator.clipboard.writeText(buildFile(S.file)); copy.textContent = "Copied"; } catch { copy.textContent = "Copy failed"; }
+  });
+}
+
+// -------------------------------------------------------------------- extend mode
+
+async function startExtend() {
+  const request = $("#request").value.trim();
+  if (request.length < 10) return toast("Describe the change in at least a sentence.");
+  S.extendBusy = true;
+  S.extendRun = null;
+  renderExtend();
+  const tick = setInterval(() => loadStatus(), 1500);
+  try {
+    S.extendRun = await post("/api/extend", { request, force: $("#force").checked });
+  } catch (e) {
+    toast(e.message);
+  } finally {
+    clearInterval(tick);
+    S.extendBusy = false;
+    loadStatus();
+    renderExtend();
+  }
+}
+
+function opVerdict(type) {
+  return (type.split("_")[0] || "").toUpperCase();
+}
+
+function renderExtend() {
+  const el = $("#run");
+  el.hidden = false;
+  if (S.extendBusy) {
+    el.innerHTML = `<div class="callout info"><div style="display:flex;gap:10px;align-items:center"><span class="spinner"></span><span>Reading the request with a free model, then diffing it against the live system…</span></div></div>`;
+    return;
+  }
+  const run = S.extendRun;
+  if (!run) { el.hidden = true; return; }
+  const out = [`<div class="card"><div class="eyebrow">Change to the logistics system</div><div class="flow" style="margin-top:6px">${run.history.map((h, i) => `${i ? '<span class="arrow">›</span>' : ""}<span class="st">${esc(h.state)}</span>`).join("")}</div></div>`];
+
+  if (run.state === "ANALYSIS_FAILED") out.push(`<div class="callout bad"><div class="callout-title">Planning stopped</div><div>${esc(run.error)}</div></div>`);
+  if (run.state === "CLARIFICATION_REQUIRED" && run.spec) {
+    out.push(`<div class="callout warn"><div class="callout-title">These change what would be built</div><ul>${run.spec.openQuestions.filter((q) => q.blocks === "structure").map((q) => `<li>${esc(q.question)}</li>`).join("")}</ul><div class="small">Add the answers to the request, or tick “Don't stop for questions” and plan again.</div></div>`);
+  }
+  if (run.plan) {
+    const p = run.plan;
+    const groups = { entity: "CRM — entities", field: "CRM — fields", workflow: "n8n — workflows", agent: "Agents", uiPage: "UI", knowledge: "Memory" };
+    const ops = Object.entries(groups).map(([target, title]) => {
+      const list = p.operations.filter((o) => o.target === target);
+      if (!list.length) return "";
+      return `<div class="group"><h3>${esc(title)}</h3><div class="items">${list.map((o) => `<div class="item"><span class="v-badge v-${esc(opVerdict(o.type))}">${esc(opVerdict(o.type))}</span><div><div class="map"><b>${esc(o.name)}</b>${o.capability ? `<span class="badge">${esc(o.capability)}</span>` : ""}</div><div class="why">${esc(o.why)}</div>${o.performable ? "" : `<div class="changes"><span>blocked: ${esc(o.blockedReason)}</span></div>`}</div></div>`).join("")}</div></div>`;
+    }).join("");
+    out.push(`<section class="card hero">
+      <div class="hero-top"><div><div class="eyebrow">Change plan · risk ${esc(p.riskLevel)}</div><h2>${esc(p.summary)}</h2><div class="muted small">read by ${esc(shortModel(p.readBy.model))} (${esc(p.readBy.backend)})</div></div>${stateBadge(run.state)}</div>
+      <div class="stats">
+        <div class="stat"><div class="v">${p.tally.CREATE}</div><div class="l">Create</div></div>
+        <div class="stat"><div class="v">${p.tally.MODIFY}</div><div class="l">Modify</div></div>
+        <div class="stat"><div class="v">${p.tally.CONFIGURE}</div><div class="l">Configure</div></div>
+        <div class="stat"><div class="v">${p.tally.REUSE}</div><div class="l">Already there</div></div>
+        <div class="stat"><div class="v">${p.notPerformable.length}</div><div class="l">Can't perform</div></div>
+      </div>
+      ${p.unsafe ? '<div class="callout bad">Part of the system could not be read, so some “create” lines may already exist. This plan cannot be approved.</div>' : ""}
+      ${p.assumptions.length ? `<div class="callout info"><div class="callout-title">Still open</div><ul>${p.assumptions.map((a) => `<li>${esc(a)}</li>`).join("")}</ul></div>` : ""}
+      ${ops}
+      <details><summary>Plain-text diff</summary>${codeBlock(run.diff || "", "txt")}</details>
+    </section>`);
+    if (run.state === "WAITING_FOR_APPROVAL") {
+      out.push(`<div class="approval"><div class="grow"><b>Approve this plan?</b><div class="note">Approval is recorded. The change plan has no executor — nothing is applied.</div></div>
+        <input type="text" id="approver" placeholder="Your name" value="${esc(store("builder.approver") || "")}" /><button class="btn danger" id="x-reject" type="button">Reject</button><button class="btn primary" id="x-approve" type="button">Approve</button></div>`);
+    }
+  }
+  el.innerHTML = out.join("");
+  const a = $("#x-approve");
+  const r = $("#x-reject");
+  const act = async (approve) => {
+    const by = $("#approver").value.trim();
+    if (!by) return toast("Add your name — approval is recorded with it.");
+    store("builder.approver", by);
+    try { S.extendRun = await post(`/api/extend/${encodeURIComponent(run.runId)}/decide`, { approve, by }); renderExtend(); } catch (e) { toast(e.message); }
+  };
+  if (a) a.addEventListener("click", () => act(true));
+  if (r) r.addEventListener("click", () => act(false));
+}
+
+// ---------------------------------------------------------------------------- mode
+
+function setMode(mode, render = true) {
+  S.mode = mode;
+  $$(".segmented button").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.mode === mode)));
+  $("#composer-label").textContent = mode === "fork" ? "Describe the business you want built" : "Describe the change to the logistics system";
+  $("#request").placeholder = mode === "fork" ? EXAMPLES.fork[0][1] : EXAMPLES.extend[0][1];
+  $("#go").textContent = mode === "fork" ? "Draft blueprint" : "Plan the change";
+  $("#composer-hint").textContent = mode === "fork"
+    ? "One call to a free model. Everything else is generated without one."
+    : "One call to a free model to read the request; the diff against the live system is computed.";
+  $("#examples").innerHTML = EXAMPLES[mode].map(([label], i) => `<button type="button" class="chip" data-ex="${i}">${esc(label)}</button>`).join("");
+  $$("#examples [data-ex]").forEach((b) => b.addEventListener("click", () => { $("#request").value = EXAMPLES[S.mode][Number(b.dataset.ex)][1]; $("#request").focus(); }));
+  if (!render) return;
+  if (mode === "fork") renderRun();
+  else renderExtend();
+}
+
+// --------------------------------------------------------------------------- toast
+
+let toastTimer = null;
+function toast(msg) {
+  let t = $("#toast");
+  if (!t) {
+    t = document.createElement("div");
+    t.id = "toast";
+    t.setAttribute("role", "status");
+    t.style.cssText = "position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:var(--text);color:var(--surface);padding:10px 14px;border-radius:8px;font-size:13px;z-index:50;max-width:min(560px,calc(100vw - 32px));box-shadow:0 8px 24px rgba(0,0,0,.2)";
+    document.body.appendChild(t);
+  }
+  t.textContent = msg;
+  t.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { t.hidden = true; }, 4200);
+}
+
+// ---------------------------------------------------------------------------- boot
+
+function boot() {
+  $$(".segmented button").forEach((b) => b.addEventListener("click", () => setMode(b.dataset.mode)));
+  $("#go").addEventListener("click", () => (S.mode === "fork" ? startFork() : startExtend()));
+  $("#request").addEventListener("keydown", (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === "Enter") $("#go").click();
+  });
+  $("#model-pill").addEventListener("click", (e) => { e.stopPropagation(); toggleModelPopover(); });
+  $("#model-popover").addEventListener("click", (e) => e.stopPropagation());
+  $("#pop-refresh").addEventListener("click", () => loadStatus(true));
+  document.addEventListener("click", () => toggleModelPopover(false));
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") toggleModelPopover(false); });
+  $("#runs").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-run]");
+    if (b) openRun(b.dataset.run);
+  });
+  $("#builds").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-build]");
+    if (b) openBuild(b.dataset.build);
+  });
+  const deep = location.hash.match(/^#build\/([a-z0-9_-]+)$/);
+  if (deep) openBuild(deep[1]);
+
+  setMode("fork", false);
+  loadStatus();
+  loadTemplate();
+  loadRuns();
+  loadBuilds();
+  // The label stays honest between runs too: gateway health can change on its own.
+  S.statusTimer = setInterval(() => { if (!S.pollTimer && !S.extendBusy) loadStatus(); }, 20000);
+}
+
+boot();

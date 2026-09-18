@@ -24,7 +24,7 @@
 import { GoogleGenAI } from "@google/genai";
 import { z } from "zod";
 import { createCommitment, type Commitment } from "../domain/commitment.js";
-import { createTwin, type StateName, type Twin } from "../domain/twin.js";
+import { createTwin, STATE_ORDER, type StateName, type Twin } from "../domain/twin.js";
 import { putCommitment, putTwin, getTwin, alreadyProcessed, markProcessed } from "./store.js";
 import { remember, type MemoryItem } from "../memory/cognee.js";
 
@@ -73,10 +73,7 @@ const ReadingSchema = z.object({
   destination: z.string().describe("Destination port or city, or empty string"),
   cargo: z.string().describe("What they want shipped, in their words, or empty string"),
   shipment_ref: z.string().describe("BL or booking number if quoted, or empty string"),
-  stage: z.enum([
-    "booking", "docs", "customs", "container", "gate_in",
-    "vessel", "transit", "arrival", "delivery", "closed",
-  ]).describe("Which stage of a shipment this mail concerns. Use 'booking' for a new enquiry."),
+  stage: z.enum(STATE_ORDER).describe("Which stage of a shipment this mail concerns. Use 'booking' for a new enquiry."),
   commitments: z.array(z.object({
     what: z.string().describe("The promise, one line"),
     owner: z.enum(["shipmate", "customer", "carrier", "cha", "transporter", "desk"]),

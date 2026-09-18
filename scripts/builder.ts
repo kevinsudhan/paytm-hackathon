@@ -30,7 +30,7 @@ if (!request) {
 }
 
 const rs = await routerStatus();
-console.log(`router: gateway ${rs.gatewayUp ? "UP" : "down"} at ${rs.gateway}, direct fallback ${rs.directFallback ? "available" : "MISSING"}`);
+console.log(`router: ${rs.gatewayName} ${rs.gatewayUp ? (rs.gatewayAuthorised ? "UP" : "UP but rejects the key") : "down"} at ${rs.gateway}, paid fallback ${rs.paidFallback ? "ON" : "off"}`);
 console.log(`ladder: ${rs.ladder.join(" -> ")}\n`);
 
 // --force starts at the clarification cap, so the first pass carries open questions as

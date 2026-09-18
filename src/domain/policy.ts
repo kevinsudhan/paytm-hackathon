@@ -10,33 +10,32 @@
  * a human reading the ledger needs to know which: "illegal in customs" is a bug in the
  * plan, "needs approval over ₹50,000" is the system working.
  *
- * The thresholds are money, so they are explicit constants rather than config a deploy
- * could quietly change. Raising one should be a commit someone signs off on.
+ * Which actions are always held and where the numeric brakes sit belong to the active
+ * vertical (src/verticals/). They are money, so they live in a committed module rather
+ * than an environment variable: raising one is still a commit someone signs off on.
  */
 
 import type { Action } from "./twin.js";
+import type { Approver, ThresholdRule, VerticalConfig } from "../verticals/types.js";
+import { ACTIVE } from "../verticals/active.js";
 
 export type Verdict =
   | { autonomy: "alone" }
-  | { autonomy: "approve"; why: string; approver: "desk" | "compliance" | "finance" };
+  | { autonomy: "approve"; why: string; approver: Approver };
 
-/** Payments at or above this need a human. Slide 11's "autonomy with a brake". */
-export const PAYMENT_APPROVAL_THRESHOLD_INR = 50_000;
+const RULES = ACTIVE.policy.thresholds as ThresholdRule<Action>[];
 
-/** Discount beyond this off the rate card is a commercial decision, not an operational one. */
-export const DISCOUNT_APPROVAL_THRESHOLD_PCT = 10;
+function limitFor(measure: ThresholdRule<Action>["measure"]): number {
+  const rule = RULES.find((r) => r.measure === measure);
+  if (!rule) throw new Error(`the active vertical sets no ${measure} threshold`);
+  return rule.limit;
+}
 
-/**
- * Actions that are never autonomous regardless of amount. These are the four on slide 13,
- * expressed as actions rather than English.
- */
-const ALWAYS_APPROVED: Partial<Record<Action, { why: string; approver: "desk" | "compliance" | "finance" }>> = {
-  file_customs: { why: "customs filing is a compliance decision", approver: "compliance" },
-  request_exemption: { why: "an exemption request is a compliance decision", approver: "compliance" },
-  pay_duty: { why: "duty payment moves money", approver: "finance" },
-  dispute_billing: { why: "a billing dispute is a commercial position", approver: "desk" },
-  release_do: { why: "releasing the delivery order releases the cargo", approver: "desk" },
-};
+/** At or above this, a payment needs a human. Read from the active vertical. */
+export const PAYMENT_APPROVAL_THRESHOLD_INR = limitFor("amount");
+
+/** A discount beyond this needs a human. Read from the active vertical. */
+export const DISCOUNT_APPROVAL_THRESHOLD_PCT = limitFor("discountPct");
 
 export interface Context {
   /** Rupees, when the action moves or commits money. */
@@ -46,31 +45,32 @@ export interface Context {
 }
 
 export function decide(action: Action, ctx: Context = {}): Verdict {
-  const always = ALWAYS_APPROVED[action];
-  if (always) return { autonomy: "approve", ...always };
+  return decideFor(ACTIVE as unknown as VerticalConfig, action, ctx);
+}
 
-  if (action === "issue_payment_link" || action === "raise_invoice") {
-    const amount = ctx.amountInr ?? 0;
-    if (amount >= PAYMENT_APPROVAL_THRESHOLD_INR) {
-      return {
-        autonomy: "approve",
-        why: `₹${amount.toLocaleString("en-IN")} is at or above the ₹${PAYMENT_APPROVAL_THRESHOLD_INR.toLocaleString("en-IN")} threshold`,
-        approver: "finance",
-      };
-    }
-    return { autonomy: "alone" };
-  }
+/**
+ * The same gate for any vertical — what a built business runs. decide() above is this,
+ * bound to the deployment's own config.
+ */
+export function decideFor(v: VerticalConfig, action: string, ctx: Context = {}): Verdict {
+  const always = v.policy.alwaysApprove[action];
+  if (always) return { autonomy: "approve", why: always.why, approver: always.approver };
 
-  if (action === "quote") {
-    const discount = ctx.discountPct ?? 0;
-    if (discount > DISCOUNT_APPROVAL_THRESHOLD_PCT) {
-      return {
-        autonomy: "approve",
-        why: `${discount}% is beyond the ${DISCOUNT_APPROVAL_THRESHOLD_PCT}% policy limit`,
-        approver: "desk",
-      };
-    }
-    return { autonomy: "alone" };
+  // The first rule that names the action decides it. An action under a threshold rule is
+  // autonomous below the limit — the rule is the whole of the policy for that action.
+  const rule = v.policy.thresholds.find((r) => r.actions.includes(action));
+  if (rule) {
+    const value = (rule.measure === "amount" ? ctx.amountInr : ctx.discountPct) ?? 0;
+    const held = rule.trigger === "atOrAbove" ? value >= rule.limit : value > rule.limit;
+    if (!held) return { autonomy: "alone" };
+
+    const money = (n: number) => `${v.business.currencySymbol}${n.toLocaleString(v.business.locale)}`;
+    const relation = rule.trigger === "atOrAbove" ? "at or above" : "beyond";
+    const why =
+      rule.measure === "amount"
+        ? `${money(value)} is ${relation} the ${money(rule.limit)} threshold`
+        : `${value}% is ${relation} the ${rule.limit}% policy limit`;
+    return { autonomy: "approve", why, approver: rule.approver };
   }
 
   // Everything else — chasing documents, tracking deadlines, telling the customer what

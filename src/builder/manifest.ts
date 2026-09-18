@@ -38,6 +38,13 @@ export interface EntityDef {
   fields: string[];
   /** Primary-key-ish columns, when PostgREST tells us. */
   required: string[];
+  /**
+   * Column → Postgres type, as PostgREST reports it ("text", "numeric", "timestamp with
+   * time zone"). What lets a cloned table keep the template's types instead of guessing.
+   */
+  types?: Record<string, string>;
+  /** Columns PostgREST marks as the primary key. */
+  primaryKey?: string[];
 }
 
 export interface WorkflowDef {
@@ -121,14 +128,25 @@ async function readEntities(c: ManifestConfig): Promise<ManifestSection<EntityDe
     const doc = (await getJson(`${c.crmRestUrl}?apikey=${encodeURIComponent(c.crmServiceKey)}`, {
       apikey: c.crmServiceKey,
       Authorization: `Bearer ${c.crmServiceKey}`,
-    })) as { definitions?: Record<string, { properties?: Record<string, unknown>; required?: string[] }> };
+    })) as {
+      definitions?: Record<string, {
+        properties?: Record<string, { format?: string; type?: string; description?: string }>;
+        required?: string[];
+      }>;
+    };
 
     const defs = doc.definitions ?? {};
-    const items: EntityDef[] = Object.entries(defs).map(([name, d]) => ({
-      name,
-      fields: Object.keys(d.properties ?? {}),
-      required: d.required ?? [],
-    }));
+    const items: EntityDef[] = Object.entries(defs).map(([name, d]) => {
+      const props = d.properties ?? {};
+      return {
+        name,
+        fields: Object.keys(props),
+        required: d.required ?? [],
+        types: Object.fromEntries(Object.entries(props).map(([col, p]) => [col, p.format ?? p.type ?? "text"])),
+        // PostgREST marks keys in the description, not in a field of their own.
+        primaryKey: Object.entries(props).filter(([, p]) => (p.description ?? "").includes("<pk/>")).map(([col]) => col),
+      };
+    });
     items.sort((a, b) => a.name.localeCompare(b.name));
     return { observed: true, source, items };
   } catch (e) {

@@ -18,6 +18,8 @@
  * and `pick()` refuses to route to it.
  */
 import type { BusinessSpec } from "./spec.js";
+import type { VerticalConfig } from "../verticals/types.js";
+import { freight } from "../verticals/freight.js";
 
 export interface Template {
   id: string;
@@ -51,37 +53,29 @@ export interface Template {
   note?: string;
 }
 
-export const TEMPLATES: Template[] = [
-  {
-    id: "freight",
-    label: "Freight forwarding",
+/**
+ * A template read straight off a vertical's config.
+ *
+ * The freight template used to carry its own copy of the lifecycle and the always-approve
+ * list, which is two sources of truth for the same state machine — the builder would have
+ * planned against one while the twin enforced the other, and nothing would have noticed
+ * the day they drifted. Deriving it means the builder reads the config the kernel runs on.
+ */
+function fromVertical(v: VerticalConfig): Template {
+  return {
+    id: v.id,
+    label: v.label,
     ready: true,
-    vocabulary: [
-      "shipment", "container", "cbm", "lcl", "fcl", "consignee", "shipper", "sailing",
-      "cut-off", "cutoff", "bl", "bill of lading", "customs", "hs code", "freight",
-      "cargo", "port", "vessel", "rebate", "quote", "rfq", "forwarder", "haulier",
-    ],
-    lifecycle: [
-      "booking", "docs", "customs", "container", "gate_in",
-      "vessel", "transit", "arrival", "delivery", "closed",
-    ],
-    alwaysApprove: ["file_customs", "request_exemption", "pay_duty", "dispute_billing", "release_do"],
-    capabilityModules: [
-      "container fit (real geometry — pieces, orientation, remaining floor)",
-      "customs tariff classification",
-    ],
-    entityAliases: {
-      shipment: "real_records",
-      enquiry: "real_records",
-      customer: "real_records",
-      booking: "space_placements",
-      sailing: "space_slots",
-      container: "space_slots",
-      quote: "partner_quotes",
-      partner: "partners",
-      call: "call_logs",
-    },
-  },
+    vocabulary: v.builder.vocabulary,
+    lifecycle: [...v.lifecycle.order],
+    alwaysApprove: Object.keys(v.policy.alwaysApprove),
+    capabilityModules: v.builder.capabilityModules,
+    entityAliases: v.builder.entityAliases,
+  };
+}
+
+export const TEMPLATES: Template[] = [
+  fromVertical(freight),
   {
     id: "recruitment",
     label: "Recruitment desk",

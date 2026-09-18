@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Araxys Builder</title>
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%234f46e5'/%3E%3Cpath d='M9 22l7-13 7 13M12 17h8' stroke='white' stroke-width='2.4' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="mark" aria-hidden="true">
+        <svg viewBox="0 0 32 32"><path d="M9 22l7-13 7 13M12 17h8" /></svg>
+      </span>
+      <div>
+        <div class="brand-name">Araxys Builder</div>
+        <div class="brand-sub">New businesses from the logistics template</div>
+      </div>
+    </div>
+
+    <div class="topbar-right">
+      <div class="tokens" id="session-tokens" title="Tokens spent by drafts in this browser session">
+        <span class="k">Session</span> <b id="session-tokens-n">0</b> <span class="muted">tokens</span>
+      </div>
+      <button class="model-pill" id="model-pill" type="button" aria-haspopup="dialog" aria-expanded="false">
+        <span class="dot" id="model-dot"></span>
+        <span class="k">Model</span>
+        <b id="model-name">checking…</b>
+        <span class="tag" id="model-tag" hidden>free</span>
+        <span class="muted" id="model-via"></span>
+        <svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4" /></svg>
+      </button>
+      <div class="popover" id="model-popover" role="dialog" aria-label="Model routing" hidden>
+        <div class="pop-head">
+          <div>
+            <div class="pop-title">Model routing</div>
+            <div class="muted small" id="pop-gateway"></div>
+          </div>
+          <button class="btn ghost small" id="pop-refresh" type="button">Refresh</button>
+        </div>
+        <ol class="ladder" id="pop-ladder"></ol>
+        <div class="pop-foot small" id="pop-foot"></div>
+      </div>
+    </div>
+  </header>
+
+  <div class="layout">
+    <aside class="sidebar">
+      <section class="card">
+        <div class="card-head">
+          <div class="eyebrow">Built businesses</div>
+        </div>
+        <ul class="runs" id="builds"><li class="muted small">Loading…</li></ul>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <div>
+            <div class="eyebrow">Template</div>
+            <h2 id="tpl-label">Araxys Logistics</h2>
+          </div>
+          <span class="badge" id="tpl-live">reading…</span>
+        </div>
+        <div id="tpl-body" class="tpl-body">
+          <div class="skeleton"></div><div class="skeleton short"></div><div class="skeleton"></div>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <div class="eyebrow">Recent runs</div>
+        </div>
+        <ul class="runs" id="runs"><li class="muted small">None yet.</li></ul>
+      </section>
+    </aside>
+
+    <main class="main">
+      <div class="segmented" role="tablist" aria-label="Mode">
+        <button role="tab" aria-selected="true" data-mode="fork" id="mode-fork">New business</button>
+        <button role="tab" aria-selected="false" data-mode="extend" id="mode-extend">Change the logistics system</button>
+      </div>
+
+      <section class="card composer">
+        <label class="composer-label" for="request" id="composer-label">Describe the business you want built</label>
+        <textarea id="request" rows="4" placeholder="A dental clinic in Chennai. Patients phone in to book, reschedule or cancel appointments; the clinic sends reminders the day before and follows up after treatment."></textarea>
+        <div class="chips" id="examples"></div>
+        <div class="composer-foot">
+          <label class="check"><input type="checkbox" id="force" /> Don't stop for questions — carry them as assumptions</label>
+          <div class="grow"></div>
+          <span class="muted small" id="composer-hint">One call to a free model. Everything else is generated without one.</span>
+          <button class="btn primary" id="go" type="button">Draft blueprint</button>
+        </div>
+      </section>
+
+      <section id="run" class="run" hidden></section>
+    </main>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
