@@ -192,11 +192,14 @@ this folder — if that exists it is in another repo.
 
 ```
 src/domain/       commitment.ts, twin.ts, policy.ts + their tests
-src/engines/      callIntake, cutoffSentinel, auditLedger, store
+src/engines/      callIntake, emailIntake, margin, partners, rfq, riskEngine,
+                  cutoffSentinel, auditLedger, store
 src/memory/       cognee.ts — degrades to empty, never throws
+src/adapters/     crmV1.ts — the one that does NOT degrade quietly
 src/http/         server.ts — auth fails closed, no CORS anywhere
-n8n/              three importable workflows
-scripts/          wire-agent-webhook.mjs, demo.mjs
+n8n/              five importable workflows
+scripts/          wire-agent-webhook.mjs, n8n-deploy.mjs, demo.mjs
+docs/             ORCHESTRATION-AGENT-PLAN.md — turning this into a generator
 ```
 
 Storage is a `Map` in `engines/store.ts`. That is the right call for a hackathon and the
