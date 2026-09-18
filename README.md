@@ -10,6 +10,21 @@ promises around it.
 
 ---
 
+## Where the other half is
+
+This branch is the autonomy layer. The CRM it sits beside — the enquiry desk, the space
+engine, the quoting pipeline and the live agent-orchestration page — is on the **`crm-v1`**
+branch of this same repository, with its own history:
+
+```
+git fetch && git checkout crm-v1
+```
+
+Two branches rather than two repos, because the demo needs both running and a judge
+should not have to find the second one.
+
+---
+
 ## Why the voice agents work this way
 
 Priya (agent 717) and Arun (758) answer calls with no webhook tools at all. That is
