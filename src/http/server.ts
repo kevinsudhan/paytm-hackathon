@@ -38,6 +38,8 @@ import {
   readEmail, ingestEmail, draftReply, type EmailPayload,
 } from "../engines/emailIntake.js";
 import * as memory from "../memory/cognee.js";
+import * as rfq from "../engines/rfq.js";
+import * as crm from "../adapters/crmV1.js";
 
 const SECRET = process.env.SHIPMATE_API_SECRET ?? "";
 const PORT = Number(process.env.PORT ?? 8788);
@@ -128,6 +130,7 @@ app.get("/health", wrap(async (_req, res) => {
     autonomy: ledger.autonomyRate(),
     ingested: store.processedCount(),
     memory: mem,
+    crm: await crm.health(),
   });
 }));
 
@@ -244,6 +247,96 @@ function emailPayload(b: Record<string, unknown>): EmailPayload {
     receivedAt: (b.receivedAt as string) ?? (b.receivedDateTime as string) ?? undefined,
   };
 }
+
+// ---------------------------------------------------------------- RFQ
+
+/**
+ * Ask the market for rates on an enquiry.
+ *
+ * Selects partners, records one request each, and creates a commitment per partner owned
+ * by that partner — which is what gets them chased when they go quiet, by the sentinel
+ * that was already sweeping for vessel cut-offs.
+ *
+ * Returns the recipients and a drafted subject and body. It does not send: the mailbox
+ * belongs to n8n, and two systems both believing they own outbound mail is how a partner
+ * gets the same RFQ twice.
+ */
+app.post("/rfq/:ref/burst", wrap(async (req, res) => {
+  const ref = param(req, "ref");
+  const result = await rfq.burst(ref, {
+    replyWindowHours: req.body?.replyWindowHours,
+    useMemory: req.body?.useMemory,
+  });
+
+  if (result.skipped) {
+    return res.json({ ref, sent: false, skipped: result.skipped, recipients: [] });
+  }
+
+  const enquiry = await crm.getEnquiry(ref);
+  res.json({
+    ref,
+    sent: false, // n8n sends; this only prepares
+    recipients: result.chosen,
+    why: result.why,
+    commitments: result.commitments.map((c) => ({
+      id: c.id, what: c.what, deadline: formatIst(c.deadline),
+    })),
+    mail: rfq.draftRfq(enquiry!),
+  });
+}));
+
+/**
+ * Record a partner's reply.
+ *
+ * Matched by mail thread. Without a thread reference a reply is just mail from a partner
+ * and nothing knows which enquiry it answers, so an unmatched reply is reported rather
+ * than guessed at.
+ */
+app.post("/rfq/collect", wrap(async (req, res) => {
+  const { threadRef, text } = req.body ?? {};
+  if (!threadRef || !text) return res.status(400).json({ error: "threadRef and text are required" });
+  res.json(await rfq.collect(String(threadRef), String(text)));
+}));
+
+/** Compare what came back, apply margin, write the customer's lines. */
+app.post("/rfq/:ref/price", wrap(async (req, res) => {
+  const result = await rfq.priceFromQuotes(param(req, "ref"), {
+    policy: req.body?.policy,
+    version: req.body?.version,
+  });
+  res.json({
+    ref: result.ref,
+    verdict: result.verdict,
+    why: result.why,
+    best: result.best,
+    summary: result.summary,
+    // Only the customer-facing lines leave this endpoint. The costed originals stay in
+    // the database, where the desk can see them and a customer cannot.
+    lines: result.customerLines,
+  });
+}));
+
+/** Where this enquiry's RFQ round has got to. */
+app.get("/rfq/:ref", wrap(async (req, res) => {
+  const ref = param(req, "ref");
+  const [enquiry, quotes, lines, events] = await Promise.all([
+    crm.getEnquiry(ref), crm.quotesFor(ref), crm.linesFor(ref), crm.eventsFor(ref, 20),
+  ]);
+  if (!enquiry) return res.status(404).json({ error: `no enquiry ${ref}` });
+  res.json({
+    ref,
+    pipeline: enquiry.pipeline,
+    customer: enquiry.company || enquiry.customer_name,
+    route: `${enquiry.origin ?? "?"} -> ${enquiry.destination ?? "?"}`,
+    quotes: quotes.map((q) => ({
+      partner: q.partner_label, status: q.status,
+      amount: q.amount, currency: q.currency,
+      askedAt: q.asked_at, repliedAt: q.replied_at, dueAt: q.due_at,
+    })),
+    lines,
+    events,
+  });
+}));
 
 // ---------------------------------------------------------------- commitments
 

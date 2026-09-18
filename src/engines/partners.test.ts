@@ -90,7 +90,35 @@ console.log("\n7. Selection caps the burst and drops the unviable");
   check("drops a partner with no email", selectForRfq(noEmail).chosen.length === 1, selectForRfq(noEmail));
 }
 
-console.log("\n8. Too few partners is reported, not hidden");
+console.log("\n8. Role gates eligibility, not just tags");
+{
+  const withRole = (n: string, role: Partner["role"], score: number): Suggestion =>
+    ({ partner: { ...partner(n, []), role }, score, reasons: [], memoryUsed: false });
+
+  // A CHA and a transporter both score on a "Chennai" tag and neither can sell ocean
+  // freight. Tags say which lanes a partner covers; role says what they can price.
+  const mixed = [
+    withRole("Oceanlink", "carrier", 9),
+    withRole("Kaveri", "transporter", 7),
+    withRole("Meridian", "coloader", 5),
+    withRole("Anchor CHA", "cha", 2),
+  ];
+  const r = selectForRfq(mixed);
+  check("only carriers and coloaders are asked",
+    r.chosen.map((s) => s.partner.name).join() === "Oceanlink,Meridian",
+    r.chosen.map((s) => s.partner.name));
+  check("the transporter is excluded with a reason",
+    r.excluded.some((e) => e.partner === "Kaveri" && e.because.includes("transporter")), r.excluded);
+  check("so is the CHA", r.excluded.some((e) => e.partner === "Anchor CHA"), r.excluded);
+
+  // Asking for haulage should ask the haulier and nobody else.
+  const haulage = selectForRfq(mixed, { roles: ["transporter"] });
+  check("an explicit role list is honoured",
+    haulage.chosen.map((s) => s.partner.name).join() === "Kaveri",
+    haulage.chosen.map((s) => s.partner.name));
+}
+
+console.log("\n9. Too few partners is reported, not hidden");
 {
   const mk = (n: string, s: number): Suggestion =>
     ({ partner: partner(n, []), score: s, reasons: [], memoryUsed: false });

@@ -232,6 +232,16 @@ function byScore(a: Suggestion, b: Suggestion): number {
 }
 
 /**
+ * Who can put a price on moving a box across water.
+ *
+ * A CHA clears customs and a transporter moves a container to the port; neither sells
+ * ocean freight, however well their tags match the lane. Warehouses are out for the same
+ * reason. Pass `roles` explicitly when asking for something else — a haulage rate should
+ * ask transporters and nobody else.
+ */
+export const CAN_QUOTE_FREIGHT: Partner["role"][] = ["carrier", "coloader"];
+
+/**
  * Who to actually send the RFQ to.
  *
  * Three to five. Fewer than three and `bestOf` has nothing to compare, since it refuses to
@@ -242,27 +252,60 @@ function byScore(a: Suggestion, b: Suggestion): number {
  * Asking someone memory says never replies, purely to make up the numbers, wastes the
  * slot and teaches the desk nothing.
  */
-export function selectForRfq(ranked: Suggestion[], opts: { min?: number; max?: number } = {}): {
+export function selectForRfq(ranked: Suggestion[], opts: {
+  min?: number;
+  max?: number;
+  /** Who is allowed to answer this kind of request. See CAN_QUOTE_FREIGHT. */
+  roles?: Partner["role"][];
+} = {}): {
   chosen: Suggestion[];
   why: string;
+  excluded: Array<{ partner: string; because: string }>;
 } {
   const min = opts.min ?? 3;
   const max = opts.max ?? 5;
-  const viable = ranked.filter((s) => s.score > 0 && s.partner.emails.length > 0);
+  const roles = opts.roles ?? CAN_QUOTE_FREIGHT;
+
+  const excluded: Array<{ partner: string; because: string }> = [];
+  const viable = ranked.filter((s) => {
+    const label = s.partner.organisation || s.partner.name;
+    if (s.score <= 0) return false;
+    if (s.partner.emails.length === 0) {
+      excluded.push({ partner: label, because: "no email on file" });
+      return false;
+    }
+    // Tags say which lanes a partner covers; role says what they can actually sell. A
+    // customs house agent tagged "Chennai" scores on the origin and cannot quote ocean
+    // freight at all — asking them wastes a slot in the burst and tells the partner we do
+    // not know what they do.
+    if (!roles.includes(s.partner.role)) {
+      excluded.push({ partner: label, because: `a ${s.partner.role} cannot quote this` });
+      return false;
+    }
+    return true;
+  });
   const chosen = viable.slice(0, max);
 
   if (chosen.length === 0) {
-    return { chosen: [], why: "no partner matches this lane or cargo, and none has an email on file" };
+    return {
+      chosen: [],
+      why: excluded.length
+        ? `no eligible partner — ${excluded.map((e) => `${e.partner} (${e.because})`).join(", ")}`
+        : "no partner matches this lane or cargo",
+      excluded,
+    };
   }
   if (chosen.length < min) {
     return {
       chosen,
       why: `only ${chosen.length} partner(s) match — ${bestOfNeedsTwo(chosen.length)}`,
+      excluded,
     };
   }
   return {
     chosen,
     why: `${chosen.length} partners matched on ${chosen[0].reasons[0]?.because ?? "tags"} and above`,
+    excluded,
   };
 }
 

@@ -64,6 +64,8 @@ export interface EnquiryRow {
   stage: string;
   pipeline: string;
   target_margin_pct: number | null;
+  /** Text, not a date — v1 stores what the caller said, which is not always a real date. */
+  sailing_date: string | null;
   request_details: Record<string, unknown>;
 }
 

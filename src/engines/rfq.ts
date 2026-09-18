@@ -128,6 +128,62 @@ export async function burst(ref: string, opts: {
   };
 }
 
+/**
+ * Writes the rate request.
+ *
+ * A template, not a model call, and that is the point. An RFQ's whole job is to restate
+ * the cargo facts exactly — 18 pallets, 9,400 kg, 22 CBM — so the rate that comes back is
+ * for the shipment that exists. A model asked to write this nicely will sometimes round
+ * 9,400 to "around 9.5 tonnes", and the partner then quotes for something else.
+ *
+ * v2 has `draftRequestWithAi` for the case where an operator wants a particular steer in
+ * their own words. That is worth having and is a different job from this one, which runs
+ * unattended on every burst.
+ */
+export function draftRfq(e: crm.EnquiryRow): { subject: string; body: string } {
+  const route = `${e.origin ?? "?"} to ${e.destination ?? "?"}`;
+  const d = e.request_details ?? {};
+  const facts: string[] = [];
+
+  if (e.cargo_description) facts.push(`Cargo: ${e.cargo_description}`);
+  if (e.container_type) facts.push(`Equipment: ${e.container_type}`);
+  if (e.volume_cbm) facts.push(`Volume: ${e.volume_cbm} CBM`);
+
+  const pieces = Number(d.piece_count ?? 0);
+  const l = Number(d.piece_length_cm ?? 0);
+  const w = Number(d.piece_width_cm ?? 0);
+  const h = Number(d.piece_height_cm ?? 0);
+  if (pieces && l && w && h) facts.push(`Pieces: ${pieces} at ${l} x ${w} x ${h} cm each`);
+  const gross = Number(d.total_gross_weight_kg ?? d.gross_weight_kg ?? 0);
+  if (gross) facts.push(`Gross weight: ${gross} kg`);
+  if (e.sailing_date) facts.push(`Required sailing: on or about ${e.sailing_date}`);
+
+  // Said plainly rather than left implied. A partner who does not know a date is wanted
+  // replies whenever, and the commitment behind this request expires in the meantime.
+  const body = [
+    `Dear partner,`,
+    ``,
+    `We have an enquiry on ${route} and would like your best rate.`,
+    ``,
+    ...facts,
+    ``,
+    `Please quote your all-in rate, the currency, transit time, and how long the rate`,
+    `holds. If you cannot cover this one, a short note saying so is just as useful —`,
+    `it means we stop waiting on you and ask elsewhere.`,
+    ``,
+    `Reply to this email and our system will pick it up automatically.`,
+    ``,
+    `Araxys Logistics`,
+    `Reference: ${e.ref}`,
+  ].join("\n");
+
+  return {
+    // The ref in the subject is what survives a partner's mail client mangling the thread.
+    subject: `Rate request — ${route} — ${e.ref}`,
+    body,
+  };
+}
+
 function toPartner(r: crm.PartnerRow): Partner {
   return {
     id: r.id, name: r.name, organisation: r.organisation, role: r.role,
