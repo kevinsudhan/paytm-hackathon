@@ -20,6 +20,7 @@ import {
   type Commitment, formatIst,
 } from "../domain/commitment.js";
 import { openCommitments, putCommitment } from "./store.js";
+import { assessAll } from "./riskEngine.js";
 
 /** Commitments that have already produced an escalation, so we do not send a second. */
 const escalated = new Set<string>();
@@ -47,6 +48,40 @@ export interface SweepOptions {
  * keeping the sentinel pure means it can run in a test, in a cron, or twice by accident
  * without anyone being called twice.
  */
+/**
+ * A sweep that also asks memory.
+ *
+ * Kept separate from `sweep` rather than folded into it, because `sweep` is synchronous
+ * and pure — it runs in a test, twice by accident, or on a cron without a network. Adding
+ * an await inside it would make every one of those a graph traversal.
+ *
+ * So: the clock decides first, then memory gets a chance to raise what it knows about.
+ * Memory being down leaves the clock's answer standing, which is the whole point of the
+ * degradation rule in cognee.ts.
+ */
+export async function sweepWithMemory(opts: SweepOptions = {}): Promise<SweepResult & {
+  memoryRaised: Array<{ id: string; customer: string; what: string; to: string; because: string }>;
+}> {
+  const result = sweep(opts);
+  const memoryRaised: Array<{ id: string; customer: string; what: string; to: string; because: string }> = [];
+
+  const open = openCommitments();
+  if (open.length === 0) return { ...result, memoryRaised };
+
+  const assessments = await assessAll(open);
+  for (const c of open) {
+    const a = assessments.get(c.id);
+    if (!a || !a.memoryUsed || a.risk === c.risk) continue;
+    putCommitment({ ...c, risk: a.risk, reason: a.reason, updatedAt: new Date().toISOString() });
+    memoryRaised.push({
+      id: c.id, customer: c.customer, what: c.what, to: a.risk,
+      // The evidence, not just the verdict — see the rules at the top of riskEngine.ts.
+      because: a.evidence[0] ?? a.reason,
+    });
+  }
+  return { ...result, memoryRaised };
+}
+
 export function sweep(opts: SweepOptions = {}): SweepResult {
   const now = opts.now ?? new Date();
   const escalateTo = opts.escalateTo ?? "Aashish";

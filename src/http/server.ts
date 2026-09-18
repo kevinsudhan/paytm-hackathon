@@ -32,7 +32,7 @@ import {
 import { decide } from "../domain/policy.js";
 import * as store from "../engines/store.js";
 import * as ledger from "../engines/auditLedger.js";
-import { sweep, board } from "../engines/cutoffSentinel.js";
+import { sweep, sweepWithMemory, board } from "../engines/cutoffSentinel.js";
 import { intake, type CallPayload } from "../engines/callIntake.js";
 import {
   readEmail, ingestEmail, draftReply, type EmailPayload,
@@ -414,10 +414,14 @@ app.post("/twins/:ref/act", wrap(async (req, res) => {
 // ---------------------------------------------------------------- sentinel
 
 app.post("/sentinel/sweep", wrap(async (req, res) => {
-  res.json(sweep({
+  const opts = {
     escalateTo: req.body?.escalateTo,
     escalateWhenBlockedWithinHours: req.body?.withinHours,
-  }));
+  };
+  // The clock alone by default; memory too when asked. n8n's 15-minute cron passes
+  // withMemory so history gets a say, while a test or a manual poke stays cheap and
+  // offline. `memoryRaised` is empty rather than absent when memory had nothing to add.
+  res.json(req.body?.withMemory === false ? sweep(opts) : await sweepWithMemory(opts));
 }));
 
 // ---------------------------------------------------------------- ledger

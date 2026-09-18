@@ -26,13 +26,37 @@
 const BASE = process.env.COGNEE_BASE_URL ?? "http://localhost:8000";
 const KEY = process.env.COGNEE_API_KEY ?? "";
 const DATASET = process.env.COGNEE_DATASET ?? "araxys_shipments";
-const TIMEOUT_MS = Number(process.env.COGNEE_TIMEOUT_MS ?? 8000);
+/**
+ * A timeout per operation, because the three do wildly different amounts of work.
+ *
+ * One shared 8s ceiling was wrong: writing prose returns in under a second, but a
+ * GRAPH_COMPLETION search runs a model over a graph traversal and a cognify rebuilds the
+ * graph. Both of the latter blew through it, and because this file degrades rather than
+ * throws, the result was memory silently returning nothing — working exactly as designed,
+ * for a reason that was a configuration mistake rather than an outage.
+ *
+ * Search stays well inside the 120s n8n allows its HTTP node. Cognify runs on the nightly
+ * cron where nothing is waiting on it.
+ */
+const TIMEOUTS = {
+  write: Number(process.env.COGNEE_WRITE_TIMEOUT_MS ?? 15_000),
+  search: Number(process.env.COGNEE_SEARCH_TIMEOUT_MS ?? 60_000),
+  cognify: Number(process.env.COGNEE_COGNIFY_TIMEOUT_MS ?? 300_000),
+};
 
 export let lastError: string | null = null;
 
+/**
+ * Cognee authenticates with `X-Api-Key`, not a bearer token.
+ *
+ * This file originally sent `Authorization: Bearer`, written from the shape most APIs use
+ * rather than from Cognee's own spec. The tenant publishes an OpenAPI document at
+ * /openapi.json — read that before changing anything here, because a wrong header fails as
+ * a 401 that looks exactly like a wrong key.
+ */
 function headers(): Record<string, string> {
   const h: Record<string, string> = { "Content-Type": "application/json" };
-  if (KEY) h.Authorization = `Bearer ${KEY}`;
+  if (KEY) h["X-Api-Key"] = KEY;
   return h;
 }
 
@@ -41,13 +65,13 @@ function headers(): Record<string, string> {
  * it looks: cognify can take tens of seconds on a large batch, and without a ceiling a
  * slow graph build would hold a webhook response open until SnapServe gives up on us.
  */
-async function call<T>(path: string, body: unknown, fallback: T): Promise<T> {
+async function call<T>(path: string, body: unknown, fallback: T, timeoutMs = TIMEOUTS.write): Promise<T> {
   try {
     const r = await fetch(`${BASE}${path}`, {
       method: "POST",
       headers: headers(),
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(TIMEOUT_MS),
+      signal: AbortSignal.timeout(timeoutMs),
     });
     if (!r.ok) {
       lastError = `${path} -> HTTP ${r.status} ${(await r.text()).slice(0, 200)}`;
@@ -98,11 +122,18 @@ function render(item: MemoryItem): string {
   return `${item.text.trim()}\n\n[${tags}]`;
 }
 
-/** Adds items to the dataset. Does not build the graph — call `cognify` after. */
+/**
+ * Adds items to the dataset. Does not build the graph — call `cognify` after.
+ *
+ * Uses `/api/v1/add_text` rather than `/api/v1/add`: the latter takes multipart/form-data
+ * for file uploads, and everything here is already prose in memory. Sending JSON to the
+ * multipart endpoint fails as a 422 whose message is about form fields, which is a
+ * confusing way to learn you picked the wrong one of two similarly named routes.
+ */
 export async function remember(items: MemoryItem[]): Promise<{ added: number }> {
   if (items.length === 0) return { added: 0 };
-  const res = await call<unknown>("/api/v1/add", {
-    data: items.map(render),
+  const res = await call<unknown>("/api/v1/add_text", {
+    textData: items.map(render),
     datasetName: DATASET,
   }, null);
   return { added: res === null ? 0 : items.length };
@@ -116,11 +147,19 @@ export async function remember(items: MemoryItem[]): Promise<{ added: number }> 
  * no benefit, because nothing reads the graph until the next risk sweep anyway.
  */
 export async function cognify(): Promise<{ ok: boolean }> {
-  const res = await call<unknown>("/api/v1/cognify", { datasets: [DATASET] }, null);
+  const res = await call<unknown>("/api/v1/cognify", { datasets: [DATASET] }, null, TIMEOUTS.cognify);
   return { ok: res !== null };
 }
 
-export type SearchType = "GRAPH_COMPLETION" | "RAG_COMPLETION" | "INSIGHTS" | "CHUNKS" | "SUMMARIES";
+/**
+ * The search types this tenant actually accepts, taken from its /openapi.json rather than
+ * from memory. "INSIGHTS" was in the original list here and is NOT one of them — it would
+ * have failed as a 422 the first time anything asked for it.
+ */
+export type SearchType =
+  | "GRAPH_COMPLETION" | "RAG_COMPLETION" | "HYBRID_COMPLETION" | "TRIPLET_COMPLETION"
+  | "GRAPH_SUMMARY_COMPLETION" | "NATURAL_LANGUAGE" | "TEMPORAL"
+  | "CHUNKS" | "SUMMARIES" | "FEELING_LUCKY";
 
 export interface Insight {
   text: string;
@@ -143,7 +182,7 @@ export async function recall(
     searchType: opts.searchType ?? "GRAPH_COMPLETION",
     datasets: [DATASET],
     topK: opts.limit ?? 5,
-  }, null);
+  }, null, TIMEOUTS.search);
   return normalise(res);
 }
 
@@ -154,22 +193,41 @@ export async function recall(
  */
 function normalise(res: unknown): Insight[] {
   if (res === null || res === undefined) return [];
-  const list = Array.isArray(res)
-    ? res
-    : typeof res === "object" && res !== null && Array.isArray((res as { results?: unknown[] }).results)
-      ? (res as { results: unknown[] }).results
-      : [];
+
   const out: Insight[] = [];
-  for (const item of list) {
-    if (typeof item === "string") out.push({ text: item });
-    else if (item && typeof item === "object") {
-      const o = item as Record<string, unknown>;
-      const text = o.text ?? o.content ?? o.answer ?? o.summary;
-      if (typeof text === "string") {
-        out.push({ text, score: typeof o.score === "number" ? o.score : undefined });
-      }
+  const push = (v: unknown, score?: number) => {
+    if (typeof v === "string" && v.trim()) out.push({ text: v, score });
+  };
+
+  const visit = (node: unknown): void => {
+    if (typeof node === "string") return push(node);
+    if (Array.isArray(node)) return node.forEach(visit);
+    if (!node || typeof node !== "object") return;
+
+    const o = node as Record<string, unknown>;
+
+    /**
+     * This tenant wraps results per dataset:
+     *
+     *   [{ dataset_id, dataset_name, search_result: ["...the answer..."] }]
+     *
+     * An earlier version of this function knew about `results`, `text`, `content`,
+     * `answer` and `summary` but not `search_result`, so a perfectly good answer from
+     * Cognee came back as zero insights — and because this module degrades quietly, it
+     * looked like memory had nothing to say rather than like a parsing bug. Recursing
+     * over the known container keys is what stops the next shape change doing the same.
+     */
+    for (const key of ["search_result", "results", "result", "data", "items"]) {
+      if (key in o) return visit(o[key]);
     }
-  }
+
+    const score = typeof o.score === "number" ? o.score : undefined;
+    for (const key of ["text", "content", "answer", "summary", "value"]) {
+      if (typeof o[key] === "string") return push(o[key], score);
+    }
+  };
+
+  visit(res);
   return out;
 }
 
@@ -198,7 +256,7 @@ export async function riskSignals(input: {
 /** For the health endpoint — reports reachability without pretending memory is fine. */
 export async function health(): Promise<{ reachable: boolean; dataset: string; lastError: string | null }> {
   try {
-    const r = await fetch(`${BASE}/health`, { signal: AbortSignal.timeout(3000) });
+    const r = await fetch(`${BASE}/health`, { headers: headers(), signal: AbortSignal.timeout(5000) });
     return { reachable: r.ok, dataset: DATASET, lastError };
   } catch (e) {
     return { reachable: false, dataset: DATASET, lastError: e instanceof Error ? e.message : String(e) };

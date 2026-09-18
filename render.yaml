@@ -46,5 +46,9 @@ services:
       # rather than pretending it works.
       - key: COGNEE_BASE_URL
         sync: false
+      - key: COGNEE_API_KEY
+        sync: false
       - key: COGNEE_DATASET
         value: araxys_shipments
+      - key: COGNEE_SEARCH_TIMEOUT_MS
+        value: 60000
