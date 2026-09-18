@@ -25,6 +25,47 @@ import { remember, type MemoryItem } from "../memory/cognee.js";
 const client = new Anthropic(); // resolves ANTHROPIC_API_KEY / auth profile
 
 /**
+ * Haiku by default, because this is a reading task on every call the desk takes.
+ *
+ * Extraction is mostly reading, not reasoning: the transcript says what it says, and the
+ * work is pulling fields out faithfully. Both models were run against real call 24374 —
+ * 2,391 characters of run-together Tamil/English ASR — and agreed on everything the engine
+ * acts on: stage `booking`, the 15 Sept sailing and 13 Sept cut-off, and zero commitments
+ * from a call where nobody promised anything.
+ *
+ * They did NOT agree on one thing, and it is worth knowing which. Opus captured the rate —
+ * "INR 4,200 per CBM, minimum INR 34,000, plus THC both ends and documentation fee". Haiku
+ * wrote "quoted freight rates" with no numbers. For a freight desk the quoted rate is
+ * close to the most important commercial fact in the call, and it survives only in the
+ * summary text; no structured field holds it.
+ *
+ * Haiku is the default because it is a fifth of the price ($1/$5 per MTok against $5/$25)
+ * and gets everything structured right. If the rate detail in summaries starts mattering,
+ * CLAUDE_MODEL=claude-opus-5 and the request params adjust themselves — see
+ * `thinkingParams`. The real fix is a rate field in the schema, which would let the cheap
+ * model capture it too.
+ */
+const MODEL = process.env.CLAUDE_MODEL ?? "claude-haiku-4-5";
+
+/**
+ * Thinking and effort are configured differently per model family, and getting it wrong
+ * is a 400 rather than a degraded answer:
+ *
+ *   Haiku 4.5      `effort` errors outright; thinking takes budget_tokens, not adaptive
+ *   Opus / Sonnet  adaptive thinking, `effort` inside output_config, budget_tokens removed
+ *
+ * Extraction does not benefit from thinking on either, so the cheap path sends neither and
+ * the capable path sends adaptive at medium — which is where it stopped getting better.
+ */
+function thinkingParams(model: string): {
+  thinking?: { type: "adaptive" };
+  effort?: "low" | "medium" | "high";
+} {
+  if (model.includes("haiku")) return {};
+  return { thinking: { type: "adaptive" }, effort: "medium" };
+}
+
+/**
  * Repairs the run-together words the Sarvam ASR produces ("thisis Priyafromthe").
  *
  * Only splits where the join is unambiguous: a lowercase letter immediately followed by an
@@ -129,14 +170,13 @@ export async function intake(payload: CallPayload): Promise<IntakeResult> {
   }
 
   const callTime = payload.createdAt ?? new Date().toISOString();
+  const { thinking, effort } = thinkingParams(MODEL);
   const response = await client.messages.parse({
-    model: "claude-opus-5",
+    model: MODEL,
     max_tokens: 8000,
     system: SYSTEM,
-    // Extraction is a reading task, not a reasoning one. Medium effort is where this
-    // stops getting better, and every call on the desk runs through here.
-    output_config: { effort: "medium", format: zodOutputFormat(ExtractionSchema) },
-    thinking: { type: "adaptive" },
+    output_config: { format: zodOutputFormat(ExtractionSchema), ...(effort ? { effort } : {}) },
+    ...(thinking ? { thinking } : {}),
     messages: [{
       role: "user",
       content:
