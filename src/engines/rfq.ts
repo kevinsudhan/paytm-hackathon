@@ -184,6 +184,21 @@ export function draftRfq(e: crm.EnquiryRow): { subject: string; body: string } {
   };
 }
 
+/**
+ * Links a sent mail to the request it answers.
+ *
+ * Without this the round is one-way: the mail goes out, a reply comes back, and nothing
+ * connects them. The thread id is the only durable link — subject lines get edited and
+ * message ids change on every reply.
+ */
+export async function attachThread(ref: string, partnerEmail: string, threadRef: string): Promise<boolean> {
+  const row = await crm.setThread(ref, partnerEmail, threadRef);
+  if (!row) return false;
+  await crm.logEvent(ref, "rfq.thread", `Rate request to ${row.partner_label} is on thread ${threadRef}`,
+    { partner: row.partner_label, threadRef });
+  return true;
+}
+
 function toPartner(r: crm.PartnerRow): Partner {
   return {
     id: r.id, name: r.name, organisation: r.organisation, role: r.role,

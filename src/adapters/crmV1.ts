@@ -140,6 +140,16 @@ export async function recordAsk(rows: Array<{
   });
 }
 
+/** Attach the mail thread a request went out on. Returns null if there was no such request. */
+export async function setThread(ref: string, partnerEmail: string, threadRef: string): Promise<PartnerQuoteRow | null> {
+  const rows = await rest<PartnerQuoteRow[]>(
+    `partner_quotes?enquiry_ref=eq.${encodeURIComponent(ref)}` +
+    `&partner_email=eq.${encodeURIComponent(partnerEmail)}&status=eq.asked`,
+    { method: "PATCH", headers: RETURNING, body: JSON.stringify({ thread_ref: threadRef }) },
+  );
+  return rows[0] ?? null;
+}
+
 export async function quotesFor(ref: string): Promise<PartnerQuoteRow[]> {
   return rest<PartnerQuoteRow[]>(
     `partner_quotes?enquiry_ref=eq.${encodeURIComponent(ref)}&select=*&order=asked_at`,

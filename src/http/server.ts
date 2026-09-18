@@ -316,6 +316,25 @@ app.post("/rfq/:ref/price", wrap(async (req, res) => {
   });
 }));
 
+/**
+ * Record the mail thread a request went out on.
+ *
+ * n8n calls this after Gmail sends, rather than PATCHing Postgres itself. The alternative
+ * was putting the service_role key into a workflow, and that key bypasses RLS on every
+ * table in the CRM — it belongs in one process, not in a workflow JSON that gets exported,
+ * shared and pasted into chat.
+ */
+app.post("/rfq/:ref/thread", wrap(async (req, res) => {
+  const ref = param(req, "ref");
+  const { partnerEmail, threadRef } = req.body ?? {};
+  if (!partnerEmail || !threadRef) {
+    return res.status(400).json({ error: "partnerEmail and threadRef are required" });
+  }
+  const updated = await rfq.attachThread(ref, String(partnerEmail), String(threadRef));
+  if (!updated) return res.status(404).json({ error: `no outstanding request to ${partnerEmail} on ${ref}` });
+  res.json({ ref, partnerEmail, threadRef, ok: true });
+}));
+
 /** Where this enquiry's RFQ round has got to. */
 app.get("/rfq/:ref", wrap(async (req, res) => {
   const ref = param(req, "ref");

@@ -1,0 +1,265 @@
+{
+  "name": "SHIPMATE 05 — RFQ over Gmail",
+  "meta": {
+    "description": "Sends rate requests to partners from a Gmail account and records the thread id against each request, so replies can be matched back. Same Gmail credential as workflow 04 — authorise once, used by both.",
+    "shipmate": {
+      "slide": "05 — the call graph, in mail",
+      "requires": [
+        "gmail OAuth2 credential",
+        "shipmate-secret credential"
+      ]
+    }
+  },
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "shipmate/rfq",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "wh-rfq",
+      "name": "Send RFQ for an enquiry",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -600,
+        300
+      ],
+      "webhookId": "shipmate-rfq",
+      "notes": "POST { \"ref\": \"ARX-ENQ-9001\" }. Called from the CRM, or by hand during a demo."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SHIPMATE_BASE }}/rfq/{{ $json.body.ref }}/burst",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\"useMemory\": true}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "http-burst",
+      "name": "SHIPMATE picks the partners",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -380,
+        300
+      ],
+      "notes": "Ranks on tags, then on what memory says each partner actually does, then gates on role — a CHA cannot quote ocean freight however well its tags match. Records one request per partner and creates a commitment per partner so the sentinel chases the quiet ones.",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "shipmatesecret01",
+          "name": "shipmate-secret"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "has-recipients",
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              },
+              "leftValue": "={{ $json.recipients.length }}",
+              "rightValue": 0
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "if-recipients",
+      "name": "Anyone to ask?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -160,
+        300
+      ],
+      "notes": "No eligible partner is a real outcome, not an error — the burst says why, and the desk needs to see that rather than a silent nothing."
+    },
+    {
+      "parameters": {
+        "jsCode": "// One item per partner, so the Gmail node sends one mail each rather than one mail\n// with everybody on it. Partners must not see who else was asked: it tells them who\n// they are bidding against, and the desk loses the rate.\nconst burst = $input.first().json;\nreturn burst.recipients.map((r) => ({\n  json: {\n    ref: burst.ref,\n    to: r.email,\n    partner: r.partner,\n    subject: burst.mail.subject,\n    body: burst.mail.body,\n  },\n}));"
+      },
+      "id": "fan-out",
+      "name": "One mail per partner",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        60,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $json.to }}",
+        "subject": "={{ $json.subject }}",
+        "emailType": "text",
+        "message": "={{ $json.body }}",
+        "options": {}
+      },
+      "id": "gmail-send",
+      "name": "Send the rate request",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        280,
+        220
+      ],
+      "notes": "Plain text on purpose. A partner's mail client quotes plain text cleanly on reply, which keeps the thread readable — and the thread is how the answer gets matched back."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SHIPMATE_BASE }}/rfq/{{ $('One mail per partner').item.json.ref }}/thread",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ partnerEmail: $('One mail per partner').item.json.to, threadRef: $json.threadId }) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "record-thread",
+      "name": "Record the thread id",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        500,
+        220
+      ],
+      "notes": "Goes through SHIPMATE rather than PATCHing Postgres directly. The alternative was putting the service_role key into this workflow, and that key bypasses RLS on every table in the CRM — it belongs in one process, not in a JSON that gets exported and shared. Gmail returns threadId on send; it is the only durable link between a request and its answer.",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "shipmatesecret01",
+          "name": "shipmate-secret"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ ref: $('SHIPMATE picks the partners').item.json.body.ref, asked: $('SHIPMATE picks the partners').item.json.body.recipients.length, why: $('SHIPMATE picks the partners').item.json.body.why }) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "respond",
+      "name": "200",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        720,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Collecting the replies\n\nWorkflow **04** already polls this mailbox. A partner's reply arrives there like any other mail — what makes it an RFQ reply is that its `threadId` matches a row in `partner_quotes`.\n\nSo 04's branch for it is:\n\n`POST {{ $env.SHIPMATE_BASE }}/rfq/collect`\nwith `{ threadRef: <threadId>, text: <body> }`\n\nIf the thread matches nothing outstanding, SHIPMATE says so and the mail falls through to the ordinary enquiry reader. Nothing is guessed at.",
+        "height": 340,
+        "width": 400
+      },
+      "id": "note-collect",
+      "name": "How replies come back",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        60,
+        440
+      ]
+    }
+  ],
+  "connections": {
+    "Send RFQ for an enquiry": {
+      "main": [
+        [
+          {
+            "node": "SHIPMATE picks the partners",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SHIPMATE picks the partners": {
+      "main": [
+        [
+          {
+            "node": "Anyone to ask?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Anyone to ask?": {
+      "main": [
+        [
+          {
+            "node": "One mail per partner",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "200",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "One mail per partner": {
+      "main": [
+        [
+          {
+            "node": "Send the rate request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send the rate request": {
+      "main": [
+        [
+          {
+            "node": "Record the thread id",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Record the thread id": {
+      "main": [
+        [
+          {
+            "node": "200",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}
