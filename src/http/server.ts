@@ -144,6 +144,9 @@ app.post("/calls/ingest", wrap(async (req, res) => {
     summary: result.extraction?.summary ?? null,
     stage: result.extraction?.stage ?? null,
     shipmentRef: result.twin?.shipmentRef ?? null,
+    quote: result.extraction?.quote ?? null,
+    sailingDate: result.extraction?.sailing_date || null,
+    bookingCutoff: result.extraction?.booking_cutoff || null,
     remembered: result.remembered,
     commitments: result.commitments.map((c) => ({
       id: c.id, what: c.what, owner: c.owner, risk: c.risk,
