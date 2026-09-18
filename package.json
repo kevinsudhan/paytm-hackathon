@@ -13,7 +13,7 @@
     "check:workflows": "node scripts/validate-workflows.mjs",
     "n8n:deploy": "node scripts/n8n-deploy.mjs",
     "demo": "node scripts/demo.mjs",
-    "test:domain": "tsx src/domain/commitment.test.ts && tsx src/domain/twin.test.ts && tsx src/engines/emailIntake.test.ts && tsx src/engines/store.test.ts && tsx src/engines/riskEngine.test.ts"
+    "test:domain": "tsx src/domain/commitment.test.ts && tsx src/domain/twin.test.ts && tsx src/engines/emailIntake.test.ts && tsx src/engines/store.test.ts && tsx src/engines/riskEngine.test.ts && tsx src/engines/margin.test.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.126.0",
