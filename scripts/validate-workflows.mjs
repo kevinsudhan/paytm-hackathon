@@ -19,13 +19,22 @@ import { fileURLToPath } from "node:url";
 const here = path.dirname(fileURLToPath(import.meta.url));
 const dir = path.join(here, "..", "n8n");
 
-const TRIGGERS = [
+/**
+ * What counts as a trigger.
+ *
+ * The named ones plus anything whose type ends in "Trigger", which is n8n's own naming
+ * convention for every app trigger — gmailTrigger, slackTrigger, and the hundreds of
+ * others. A fixed list was wrong the first time a new source was added: the Gmail
+ * workflow was reported as having no trigger and every node unreachable, when the only
+ * thing missing was a line here.
+ */
+const NAMED_TRIGGERS = [
   "n8n-nodes-base.webhook",
-  "n8n-nodes-base.scheduleTrigger",
   "n8n-nodes-base.cron",
-  "n8n-nodes-base.manualTrigger",
-  "n8n-nodes-base.executeWorkflowTrigger",
+  "n8n-nodes-base.start",
 ];
+
+const isTrigger = (type) => NAMED_TRIGGERS.includes(type) || /Trigger$/.test(type);
 
 /** Nodes that legitimately sit unconnected — notes are documentation, not flow. */
 const STANDALONE = ["n8n-nodes-base.stickyNote"];
@@ -67,7 +76,7 @@ for (const file of fs.readdirSync(dir).filter((f) => f.endsWith(".json")).sort()
   if (dangling === 0) pass("every connection resolves to a real node");
 
   // 3. At least one trigger, or nothing ever runs.
-  const triggers = wf.nodes.filter((n) => TRIGGERS.includes(n.type));
+  const triggers = wf.nodes.filter((n) => isTrigger(n.type));
   if (triggers.length === 0) fail(file, "no trigger node — this workflow can never fire");
   else pass(`${triggers.length} trigger(s): ${triggers.map((t) => t.name).join(", ")}`);
 

@@ -1,0 +1,112 @@
+{
+  "name": "SHIPMATE 04 — Gmail to commitments",
+  "meta": {
+    "description": "Polls a Gmail mailbox and pushes each new message through SHIPMATE's reader. Replaces v2's Microsoft Graph leg with Gmail for the demo. The Gmail credential is authorised once in n8n's own UI — nothing here holds a Google token.",
+    "shipmate": { "slide": "04 — CUSTOMER sub-agent, email intelligence", "requires": ["gmail OAuth2 credential", "shipmate-secret credential"] }
+  },
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": { "item": [{ "mode": "everyMinute" }] },
+        "simple": false,
+        "filters": {},
+        "options": { "downloadAttachments": false }
+      },
+      "id": "gmail-trigger",
+      "name": "New mail",
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1.2,
+      "position": [-580, 300],
+      "notes": "Click Connect on the credential and authorise your Google account once. n8n stores the token; SHIPMATE never sees it. Attachments are off — the reader works on text, and a 10MB packing list through a webhook helps nobody."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Gmail and Microsoft Graph disagree on every field name, and SHIPMATE accepts Graph's\n// spelling because that is what v2 spoke. Normalising here rather than in SHIPMATE keeps\n// the mailbox vendor a detail of this workflow — swapping back to Graph, or adding a\n// second mailbox, is then a new workflow rather than a change to the service.\nconst out = [];\n\nfor (const item of $input.all()) {\n  const m = item.json;\n\n  // Gmail nests headers; n8n flattens some of them but not reliably across versions.\n  const headers = m.headers ?? {};\n  const subject = m.subject ?? headers.subject ?? '';\n  const from = m.from?.value?.[0]?.address ?? m.From ?? headers.from ?? '';\n\n  // Prefer the HTML part when both exist: it is what the sender actually wrote, and\n  // SHIPMATE strips the markup itself.\n  const html = m.html ?? m.textHtml ?? '';\n  const text = m.text ?? m.textPlain ?? m.snippet ?? '';\n\n  out.push({\n    json: {\n      messageId: m.id ?? m.messageId ?? m.threadId,\n      subject,\n      from,\n      body: html || text,\n      isHtml: Boolean(html),\n      receivedAt: m.date ?? m.internalDate ?? new Date().toISOString(),\n    },\n  });\n}\n\nreturn out;"
+      },
+      "id": "normalise",
+      "name": "Gmail shape to SHIPMATE shape",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-360, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SHIPMATE_BASE }}/email/ingest",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": { "timeout": 120000, "response": { "response": { "neverError": true, "fullResponse": true } } }
+      },
+      "id": "http-ingest",
+      "name": "SHIPMATE /email/ingest",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-140, 300],
+      "notes": "SHIPMATE decides whether this is an enquiry and whether it is confident enough to act. Most mail comes back acted:false with a reason, which is the point — a newsletter must not become a customer record. Ingest is idempotent on messageId, so a re-poll costs nothing.",
+      "credentials": { "httpHeaderAuth": { "id": "shipmatesecret01", "name": "shipmate-secret" } }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": false, "version": 2 },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "acted",
+              "operator": { "type": "boolean", "operation": "true", "singleValue": true },
+              "leftValue": "={{ $json.body.acted }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "if-acted",
+      "name": "Was it a real enquiry?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [80, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SHIPMATE_BASE }}/sentinel/sweep",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\"escalateTo\": \"Aashish\", \"withinHours\": 4}",
+        "options": { "timeout": 30000 }
+      },
+      "id": "http-sweep",
+      "name": "Re-sweep the board",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [300, 220],
+      "notes": "A new commitment changes the risk picture straight away, so the desk sees it now rather than at the next cron tick.",
+      "credentials": { "httpHeaderAuth": { "id": "shipmatesecret01", "name": "shipmate-secret" } }
+    },
+    {
+      "parameters": {
+        "content": "## Drafting a reply\n\n`POST /email/draft` returns a reply body for a message, with an optional `instruction` in the operator's own words (\"tell them space is confirmed, ask for the packing list\").\n\nIt is deliberately **not** wired to a Gmail send node here. Sending mail on a customer's behalf is a human's decision, and a draft that posts itself the moment a model produces it is how a wrong rate reaches a real consignee.\n\nAdd a send node only behind an approval step.",
+        "height": 320,
+        "width": 380
+      },
+      "id": "note-draft",
+      "name": "Reply drafting — read this",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [300, 420]
+    }
+  ],
+  "connections": {
+    "New mail": { "main": [[{ "node": "Gmail shape to SHIPMATE shape", "type": "main", "index": 0 }]] },
+    "Gmail shape to SHIPMATE shape": { "main": [[{ "node": "SHIPMATE /email/ingest", "type": "main", "index": 0 }]] },
+    "SHIPMATE /email/ingest": { "main": [[{ "node": "Was it a real enquiry?", "type": "main", "index": 0 }]] },
+    "Was it a real enquiry?": { "main": [[{ "node": "Re-sweep the board", "type": "main", "index": 0 }], []] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "pinData": {}
+}
