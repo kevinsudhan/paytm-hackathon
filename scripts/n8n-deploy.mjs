@@ -279,10 +279,16 @@ async function main() {
   console.log("Point Priya and Arun at it:\n");
   console.log(`  node scripts/wire-agent-webhook.mjs ${url}`);
   console.log(`  node scripts/wire-agent-webhook.mjs ${url} --apply\n`);
-  console.log("Before that, set these in n8n so the workflows can reach SHIPMATE:");
-  console.log("  - Environment variable SHIPMATE_BASE = your SHIPMATE public URL");
-  console.log("  - HTTP Header Auth credential named 'shipmate-secret',");
-  console.log("    header x-shipmate-secret, value from araxys-shipmate/.env\n");
+  // The URL and the credential are wired by this script now, so the old "set these in
+  // n8n" instructions were stale advice that sent someone to configure what was already
+  // configured. What is left is the per-workflow activation, which genuinely is manual.
+  console.log("The SHIPMATE URL and the shipmate-secret credential are wired by this");
+  console.log("script — nothing further to set in n8n for the call workflow.\n");
+  console.log("Imported inactive, and why:");
+  console.log("  02 cut-off sentinel  activate when you want the 15-minute sweep running");
+  console.log("  03 money rail        needs PAYTM_MID and its own credential first");
+  console.log("  04 Gmail             open it in n8n, connect a Google account on the");
+  console.log("                       trigger, then activate. The token stays in n8n.\n");
 }
 
 main().catch((e) => {
