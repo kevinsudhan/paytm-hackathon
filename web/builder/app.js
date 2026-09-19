@@ -316,7 +316,7 @@ function render() {
    The machine's own names (READING_TEMPLATE, BLUEPRINT_READY) are exact and
    are what the detailed view shows; here they would only be noise. */
 const SIMPLE_PHASES = [
-  { key: "read",     label: "Reading the logistics template" },
+  { key: "read",     label: "Laying the foundations" },
   { key: "draft",    label: "Drafting the blueprint" },
   { key: "check",    label: "Checking it against the kernel" },
   { key: "ready",    label: "Ready for your decision" },
