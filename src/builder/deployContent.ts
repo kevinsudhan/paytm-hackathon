@@ -66,6 +66,9 @@ export function userColumns(app: AppManifest, e: AppEntity) {
  * The business, told as prose. Cognee's graph extraction reads language, not JSON — the
  * same reason src/memory/cognee.ts renders its items as sentences.
  */
+/** A phrase as one sentence: exactly one full stop at the end, however it arrived. */
+const sentence = (t: string) => `${t.trim().replace(/\.+$/, "")}.`;
+
 export function memoryDocs(app: AppManifest): string[] {
   const v = app.vertical;
   const b = app.business;
@@ -93,11 +96,12 @@ export function memoryDocs(app: AppManifest): string[] {
 
   for (const e of app.entities) {
     const cols = userColumns(app, e).map((c) => human(c.name));
-    docs.push(`${b.name} keeps ${e.label.toLowerCase()}: ${e.purpose}.${cols.length ? ` Each one records ${list(cols)}.` : ""}`);
+    docs.push(`${b.name} keeps ${e.label.toLowerCase()}: ${sentence(e.purpose)}${cols.length ? ` Each one records ${list(cols)}.` : ""}`);
   }
 
   for (const a of app.agents) {
-    docs.push(`${a.name} answers the phone for ${b.name} — ${a.role.toLowerCase()}. On a call ${a.name} collects ${list(a.collects)}, and never promises anything that needs a person's approval.`);
+    const how = a.from === "Arun" ? `calls people back for ${b.name}` : `answers the phone for ${b.name}`;
+    docs.push(`${a.name} ${how} — ${sentence(a.role.toLowerCase())} On a call ${a.name} collects ${list(a.collects)}, and never promises anything that needs a person's approval.`);
   }
 
   if (app.openQuestions.length) {

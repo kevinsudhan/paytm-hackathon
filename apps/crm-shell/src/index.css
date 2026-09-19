@@ -2,14 +2,29 @@
 @tailwind components;
 @tailwind utilities;
 
+/*
+ * The look of every business the builder builds.
+ *
+ * This shell is one file shared by all of them, so the restraint here is deliberate: a
+ * dental clinic, a gym and a freight desk all open it, and anything that reads as
+ * "logistics" or as one particular trade would be wrong four times out of five. What is
+ * shared is the paper — a warm off-white ground, ink-dark text, hairline rules — and the
+ * one accent each business gets from its own id.
+ *
+ * The type is the part that carries most of the quality. A desk app is read all day at
+ * arm's length and is mostly numbers and short labels, so it wants a face with real
+ * figures rather than whatever the operating system hands over.
+ */
+
 :root {
   --surface-0: #f6f7f5;
   --surface-1: #ffffff;
   --surface-2: #f0f1ee;
+  --surface-3: #e9eae5;
 
   --text-primary: #1c1d1a;
-  --text-secondary: #63655e;
-  --text-muted: #94958c;
+  --text-secondary: #5a5c55;
+  --text-muted: #7c7e74;
   --text-accent: #0c447c;
   --text-success: #085041;
   --text-warning: #854f0b;
@@ -25,6 +40,14 @@
 
   --brand: #0f6e56;
   --brand-dark: #085041;
+
+  /*
+   * Two shadows only, both nearly invisible on their own. On paper this pale a shadow
+   * that can be seen as a shadow reads as grime; what these do is separate a card from
+   * the ground by a hair, and lift the one under the cursor.
+   */
+  --shadow-card: 0 1px 2px rgb(28 29 26 / 0.04);
+  --shadow-lift: 0 2px 8px rgb(28 29 26 / 0.07), 0 1px 2px rgb(28 29 26 / 0.05);
 }
 
 html,
@@ -36,8 +59,16 @@ body,
 body {
   background: var(--surface-0);
   color: var(--text-primary);
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+  font-family: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  /*
+   * Lining tabular figures everywhere. This desk is columns of counts, references and
+   * money: with proportional figures a 1 is narrower than a 7, so a column of numbers
+   * will not line up and the eye cannot compare down it.
+   */
+  font-variant-numeric: tabular-nums lining-nums;
+  font-feature-settings: "tnum" 1, "lnum" 1;
 }
 
 * {
@@ -46,6 +77,31 @@ body {
 
 ::selection {
   background: var(--bg-accent);
+}
+
+/*
+ * A small caps label above a heading or a number. Used instead of another grey sentence:
+ * it separates the label from the value by shape rather than by yet another tone, which
+ * is what keeps a page of cards from reading as one flat wash.
+ */
+.eyebrow {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+/*
+ * Two lines, then an ellipsis. For text the app does not control the length of — a ledger
+ * summary that ends in a uuid, a purpose someone typed a paragraph into.
+ */
+.clamp-2 {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
 }
 
 input,
@@ -72,6 +128,17 @@ button {
   font-family: inherit;
 }
 
+/*
+ * One visible focus ring for everything reached by keyboard. Never removed: a desk that
+ * takes calls all day is worked from the keyboard, and an invisible focus means the
+ * person cannot tell where they are.
+ */
+:focus-visible {
+  outline: 2px solid var(--text-secondary);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
 ::-webkit-scrollbar {
   width: 8px;
   height: 8px;
@@ -84,4 +151,14 @@ button {
 
 ::-webkit-scrollbar-track {
   background: transparent;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
 }

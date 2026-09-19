@@ -57,19 +57,37 @@ export interface AppColumn {
   leftover?: boolean;
 }
 
-/** Template columns that only mean something to freight. */
-const FREIGHT_ONLY = new Set([
-  "bl_number", "origin", "destination", "cargo_description", "volume_cbm", "container_type", "sailing_date",
+/**
+ * Template columns that only mean something to freight, split by whether a rename can
+ * honestly give one a new meaning.
+ *
+ * A LABEL can be repurposed: a slot's container_code really is the same idea as a room
+ * number, and mode really is the same idea as a class format. Renaming it is the point.
+ *
+ * A MEASURE cannot. x_m, length_m and pieces_across hold the arithmetic of packing boxes
+ * into a container. Calling one "intensity" does not make it an intensity — it makes a
+ * meaningless number with a plausible label, which is worse than an obviously freight one
+ * because nothing looks wrong. The MMA build carried nine of these onto its bookings
+ * table (duration_minutes, intensity, weeks_count, rest_days, warmup_min …) and every one
+ * was shown on the page, because the old rule read the new name and believed it.
+ */
+const FREIGHT_LABELS = new Set([
+  "bl_number", "origin", "destination", "cargo_description", "container_type", "sailing_date",
   "route", "carrier", "cutoff_date", "container_code", "mode",
-  "x_m", "length_m", "pieces_across", "pieces_high", "rows_count", "piece_length_m", "piece_width_m", "piece_height_m",
-  "weight_kg", "color_index", "sac_code", "transit_days", "target_margin_pct", "pipeline",
+  "sac_code", "transit_days", "target_margin_pct", "pipeline",
+]);
+const FREIGHT_MEASURES = new Set([
+  "volume_cbm", "x_m", "length_m", "pieces_across", "pieces_high", "rows_count",
+  "piece_length_m", "piece_width_m", "piece_height_m", "weight_kg", "color_index",
 ]);
 /** Words that give a freight column away even after a rename (piece_length_m → piece_length). */
 const FREIGHT_WORDS = /(cargo|cbm|container|sailing|carrier|piece|pieces|rows_count|color_index|weight_kg|x_m$|length_m$|bl_number|margin)/;
 
 function isLeftover(name: string, from: string | undefined): boolean {
   const original = from ?? name;
-  return FREIGHT_ONLY.has(original) && (original === name || FREIGHT_WORDS.test(name));
+  // A measurement stays leftover however it is renamed: the number never changed meaning.
+  if (FREIGHT_MEASURES.has(original)) return true;
+  return FREIGHT_LABELS.has(original) && (original === name || FREIGHT_WORDS.test(name));
 }
 
 export interface AppEntity {

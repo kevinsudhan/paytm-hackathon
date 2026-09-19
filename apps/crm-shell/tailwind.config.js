@@ -8,6 +8,7 @@ export default {
           0: "var(--surface-0)",
           1: "var(--surface-1)",
           2: "var(--surface-2)",
+          3: "var(--surface-3)",
         },
         text: {
           primary: "var(--text-primary)",
@@ -37,8 +38,13 @@ export default {
         DEFAULT: "8px",
         card: "12px",
       },
+      boxShadow: {
+        card: "var(--shadow-card)",
+        lift: "var(--shadow-lift)",
+      },
       fontFamily: {
         sans: [
+          "IBM Plex Sans",
           "-apple-system",
           "BlinkMacSystemFont",
           "Segoe UI",
@@ -48,7 +54,7 @@ export default {
           "Arial",
           "sans-serif",
         ],
-        mono: ["ui-monospace", "SFMono-Regular", "Menlo", "Consolas", "monospace"],
+        mono: ["JetBrains Mono", "ui-monospace", "SFMono-Regular", "Menlo", "Consolas", "monospace"],
       },
     },
   },

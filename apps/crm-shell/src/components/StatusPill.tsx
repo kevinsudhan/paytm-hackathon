@@ -1,57 +1,63 @@
 type Tone = "success" | "warning" | "danger" | "accent" | "neutral";
 
-const toneClasses: Record<Tone, string> = {
-  success: "bg-bg-success text-text-success",
-  warning: "bg-bg-warning text-text-warning",
-  danger: "bg-bg-danger text-text-danger",
-  accent: "bg-bg-accent text-text-accent",
-  neutral: "bg-surface-2 text-text-secondary",
+/**
+ * A state, said quietly.
+ *
+ * Every pill used to carry a tinted background, so a list of thirty records arrived as
+ * thirty coloured chips and the eye had nothing to land on. When everything is
+ * highlighted, nothing is. The colour moved into a dot and the chip itself went neutral:
+ * the state is still readable at a glance, and a screenful reads as a list rather than as
+ * a warning.
+ *
+ * `danger` is the deliberate exception and keeps its fill. Whatever the business, the
+ * danger tone is reserved for the one state that costs money for every day nobody
+ * notices it, and it should be the only thing raising its voice on the page.
+ *
+ * The dot is never the only carrier of meaning — the label is always beside it — so this
+ * works without colour vision and in a black-and-white printout.
+ */
+const dotFor: Record<Tone, string> = {
+  success: "bg-[var(--text-success)]",
+  warning: "bg-[var(--text-warning)]",
+  danger: "bg-[var(--text-danger)]",
+  accent: "bg-[var(--text-accent)]",
+  neutral: "bg-border-strong",
 };
 
-export default function StatusPill({ tone, children }: { tone: Tone; children: React.ReactNode }) {
+const chipFor: Record<Tone, string> = {
+  success: "bg-surface-1 border-border text-text-secondary",
+  warning: "bg-surface-1 border-border text-text-secondary",
+  accent: "bg-surface-1 border-border text-text-secondary",
+  neutral: "bg-surface-1 border-border text-text-muted",
+  danger: "bg-bg-danger border-[color:var(--text-danger)]/25 text-text-danger font-semibold",
+};
+
+export default function StatusPill({
+  tone,
+  children,
+  dot = true,
+}: {
+  tone: Tone;
+  children: React.ReactNode;
+  /** Off for pills already prefixed by an icon, so there is one marker and not two. */
+  dot?: boolean;
+}) {
   return (
     <span
-      className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-medium whitespace-nowrap ${toneClasses[tone]}`}
+      className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-[3px] text-[11.5px] font-medium leading-none whitespace-nowrap ${chipFor[tone]}`}
     >
+      {dot && (
+        <span aria-hidden="true" className={`w-[5px] h-[5px] rounded-full flex-none ${dotFor[tone]}`} />
+      )}
       {children}
     </span>
   );
 }
 
-export function toneForShipmentStatus(status: string): Tone {
-  switch (status) {
-    case "delivered":
-    case "booked":
-      return "success";
-    case "docs_missing":
-    case "in_transit_delay":
-    case "escalated":
-      return "warning";
-    case "demurrage_risk":
-      return "danger";
-    default:
-      return "neutral";
-  }
-}
-
-export function toneForRequestStatus(status: string): Tone {
-  switch (status) {
-    case "accepted":
-      return "success";
-    case "negotiating":
-    case "quoting":
-      return "warning";
-    case "rejected":
-      return "danger";
-    default:
-      return "neutral";
-  }
-}
-
 /**
  * A lifecycle state's tone from where it sits in the order: the first state is new work,
- * the last is done, everything between is in hand. Replaces the freight-specific
- * status lists above for a built business, whose states the template never saw.
+ * the last is done, everything between is in hand. This is the one a built business uses
+ * — its states are its own, and the template never saw them.
  */
 export function toneForState(state: string | null | undefined, order: string[]): Tone {
   if (!state) return "neutral";

@@ -13,6 +13,18 @@ import { useApp } from "../lib/app";
 import { ago, show, singular, stateLabel, subtitle } from "../lib/format";
 
 /** The CRM's ops overview — the same cards, activity and newest-work rows, for this business. */
+/**
+ * A reference short enough to read.
+ *
+ * Tables the business named — leads, members — carry a readable reference like
+ * MMA-LEA-0008 and are shown whole. Tables with no name column fall back to their key,
+ * which is a uuid; the first segment identifies it well enough on a list, and the whole
+ * thing is one click away on the record itself.
+ */
+function shortRef(id: string): string {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(id) ? id.slice(0, 8) : id;
+}
+
 export default function Overview() {
   const { info, primary, version, touch } = useApp();
   const m = info.manifest;
@@ -52,7 +64,7 @@ export default function Overview() {
     <div>
       <PageHeader
         title={`${m.business.name}`}
-        subtitle={`${v.label} desk — ${primary.label.toLowerCase()} moving through ${order.length} stages, with the template's approval rules and audit trail.`}
+        subtitle={`${primary.label.charAt(0).toUpperCase()}${primary.label.slice(1).toLowerCase()} moving through ${order.length} stages, each change checked against the approval rules and written to the audit trail.`}
         action={
           <button onClick={() => setCreating(true)} className="inline-flex items-center gap-1.5 rounded-lg bg-brand text-white text-[13px] font-medium px-3 py-2 hover:bg-brand-dark">
             <Plus size={14} /> New {singular(primary.label).toLowerCase()}
@@ -96,9 +108,13 @@ export default function Overview() {
       {data.recent.length === 0 && <p className="text-[13px] text-text-muted mb-4">Nothing has happened yet.</p>}
       {data.recent.map((r) => (
         <RowCard key={r.id} onClick={r.recordId && r.entity === primary.name ? () => navigate(`/e/${primary.name}/${encodeURIComponent(r.recordId!)}`) : undefined}>
-          <span className="flex-1 text-[13px] text-text-primary">
-            {r.recordId && <span className="font-mono text-xs text-text-secondary mr-2">{r.recordId}</span>}
-            {r.summary}
+          <span className="flex-1 min-w-0 text-[13px] text-text-primary">
+            {r.recordId && (
+              <span className="font-mono text-[11px] text-text-secondary bg-surface-2 rounded px-1.5 py-[1px] mr-2 align-middle">
+                {shortRef(r.recordId)}
+              </span>
+            )}
+            <span className="clamp-2 align-middle" title={r.summary}>{r.summary}</span>
           </span>
           <span className="text-xs text-text-muted w-24 text-right">{r.by}</span>
           <StatusPill tone={r.kind === "held" ? "warning" : r.kind === "refused" || r.kind === "rejected" ? "danger" : r.kind === "action" || r.kind === "approved" || r.kind === "advanced" ? "success" : "neutral"}>

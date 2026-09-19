@@ -470,6 +470,26 @@ export function normalise(spec: ForkSpec, t: Template, request = ""): { spec: Fo
         e.drop = e.drop.filter((c) => cols.has(c));
         notes.push(`${e.to}: ignored drop of ${badDrops.join(", ")}, not in ${e.from}`);
       }
+      // Two template columns renamed to one name. A mechanical slip like the others here,
+      // and until now the only one that failed the whole run: checkFork rejected it after
+      // a repair call had already been spent. The first column keeps the new name and the
+      // rest keep their template name, which is unique by construction \u2014 and if the
+      // column was freight geometry it is flagged leftover and hidden anyway.
+      const taken = new Set<string>();
+      for (const c of base.columns.map((x) => x.name)) {
+        if (e.drop.includes(c)) continue;
+        const want = e.rename[c] ?? c;
+        if (!taken.has(want)) { taken.add(want); continue; }
+        delete e.rename[c];
+        if (taken.has(c)) {
+          e.drop.push(c);
+          notes.push(`${e.to}: dropped "${c}" \u2014 it was renamed to "${want}", which another column already takes`);
+        } else {
+          taken.add(c);
+          notes.push(`${e.to}: "${c}" keeps its name \u2014 it was renamed to "${want}", which another column already takes`);
+        }
+      }
+
       const kept = new Set([...cols].filter((c) => !e.drop.includes(c)).map((c) => e.rename[c] ?? c));
       const dupes = e.add.filter((a) => kept.has(a.name));
       if (dupes.length) {
@@ -499,7 +519,7 @@ export function matchWorkflow(t: Template, ref: string): TemplateWorkflow | unde
 // ---------------------------------------------------------------------------- the prompt
 
 /** Bump when RULES or SHAPE change, so cached drafts from the old prompt are not reused. */
-export const PROMPT_VERSION = "fork-6";
+export const PROMPT_VERSION = "fork-7";
 
 const RULES = `You adapt an existing software system (the TEMPLATE below) into the same system for a different business. You do not design new infrastructure: the kernel is reused unchanged, and you only say how to re-shape the template's tables, agents, workflows and lifecycle for the new business.
 
@@ -511,11 +531,13 @@ Rules:
 - actions: every action a state grants must be listed in "actions", and every listed action must be granted by at least one state.
 - policy.alwaysApprove: actions a human must always approve (clinical, legal, money-moving or irreversible). approver is one of desk, compliance, finance.
 - policy.thresholds: measure is only "amount" (money) or "discountPct". If the request gives no number, reuse the template's number and add a "behaviour" question saying the number was assumed. Never put an action in both alwaysApprove and a threshold.
+- Never rename a column that measures cargo (volume_cbm, x_m, length_m, pieces_across, pieces_high, rows_count, piece_length_m, piece_width_m, piece_height_m, weight_kg, color_index). Those hold container-packing numbers and a new label does not give them a new meaning — "x_m" renamed to "intensity" is a junk number that looks real. Drop them, and "add" whatever the business actually needs instead. Renaming a template LABEL (container_code, mode, route, carrier) is fine when the new business has the same idea under another word.
+- Types: "date" for a calendar date, "timestamp with time zone" for a moment in time, "numeric" for money or a quantity. Do not use text for a date.
 - entities: clone template tables where they fit ("from" = template table name), with "rename" (old column -> new name), "drop" (template columns the business does not need) and "add" (new columns; type is one of: text, integer, bigint, numeric, boolean, date, timestamp with time zone, jsonb, uuid, text[]). Columns not mentioned are kept. Never drop a primary key. Use "from": null only for a table nothing in the template resembles. "to" must be the new business's own word and must differ from every template table name. Skip template tables the business does not need by leaving them out.
-- agents: clone template agents ("from" is Priya or Arun) and give each a new name, a role, and the fields it collects on a call.
+- agents: decide how many voice agents THIS business needs (1 to 4). Do not produce one per template agent: a business that only takes bookings needs one, and a busy one may need three. If the request names a person or a job — a receptionist, a named coach, "someone who chases renewals" — create that agent, with that name and that job. Otherwise give it an ordinary first name for the locale. "role" says what it does for this business in the business's own words ("books trial classes and takes new enquiries", "calls members whose renewal is overdue") — never a generic label like "Intake agent" or "Scheduling agent". "collects" is what that agent asks for on its own calls, which differs per agent. "from" only chooses which template agent's VOICE SETUP to copy — Priya for an agent that answers an incoming call, Arun for one that calls a customer back — and says nothing about its name or job. Several agents may copy the same one.
 - workflows: list EVERY template workflow once, with "from" = its exact name, a new name in "to", and keep true or false with a short reason.
 - memory.dataset: a new dataset name for this business, different from the template's.
-- business.name: the name given in the request. If the request gives none, use a plain description ("Dental clinic") — do not invent a brand name.
+- business.name: the name given in the request, at most 40 characters. If the request gives none, a short plain description ("Dental clinic", "MMA gym") — never an invented brand, and never the request's sentence back: "MMA business in Chennai Vangaram" is a description, not a name, and it ends up read aloud in every greeting.
 - openQuestions: only what the request leaves genuinely open. "structure" if the answer changes which tables, agents or workflows exist; otherwise "behaviour". Do not invent specifics; ask instead.
 - Use the requester's own words for things.`;
 

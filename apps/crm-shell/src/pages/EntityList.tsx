@@ -49,12 +49,16 @@ export default function EntityList() {
   return (
     <div>
       <PageHeader
+        eyebrow={isPrimary ? "Pipeline" : undefined}
         title={e.label}
-        subtitle={e.purpose + (e.from ? ` · cloned from the template's ${e.from}` : "")}
+        subtitle={e.purpose}
         action={
           e.role !== "events" && e.role !== "calls" ? (
-            <button onClick={() => setCreating(true)} className="inline-flex items-center gap-1.5 rounded-lg bg-brand text-white text-[13px] font-medium px-3 py-2 hover:bg-brand-dark">
-              <Plus size={14} /> New {singular(e.label).toLowerCase()}
+            <button
+              onClick={() => setCreating(true)}
+              className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg bg-brand text-white text-[13px] font-medium px-3.5 py-2 shadow-card hover:bg-brand-dark transition-colors"
+            >
+              <Plus size={14} className="flex-none" /> New {singular(e.label).toLowerCase()}
             </button>
           ) : undefined
         }

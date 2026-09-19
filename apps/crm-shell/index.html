@@ -6,6 +6,15 @@
     <!-- Where the app is served. The server rewrites this: "/" on the app's own port,
          "/apps/<build>/" inside a hosted builder. src/lib/base.ts reads it. -->
     <base href="/" />
+    <!-- IBM Plex Sans for the page, JetBrains Mono for references and figures. Both fall
+         back to the system stack in index.css, so an app on a desk with no internet still
+         reads correctly — it just reads in the system face. -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
     <title>Loading…</title>
   </head>
   <body>
