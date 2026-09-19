@@ -63,7 +63,19 @@
          app.js plays it while this view is showing, and not at all for
          reduced motion. -->
     <div class="backdrop" aria-hidden="true">
-      <video id="backdrop-video" muted loop playsinline preload="auto" tabindex="-1" disablepictureinpicture disableremoteplayback>
+      <video
+        id="backdrop-video"
+        muted
+        loop
+        playsinline
+        autoplay
+        preload="auto"
+        tabindex="-1"
+        poster="assets/midnight-bloom-poster.webp"
+        disablepictureinpicture
+        disableremoteplayback
+      >
+        <source src="assets/midnight-bloom.mp4" type="video/mp4" />
         <source src="assets/midnight-bloom.webm" type="video/webm" />
       </video>
     </div>

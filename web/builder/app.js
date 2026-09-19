@@ -297,12 +297,69 @@ function setView(view, remember = true) {
  * detailed view never pays for decoding it. For prefers-reduced-motion it never
  * plays; the first frame stays as a still background.
  */
+function backdropShouldPlay() {
+  return (
+    S.view === "simple" &&
+    document.visibilityState === "visible" &&
+    !window.matchMedia("(prefers-reduced-motion: reduce)").matches
+  );
+}
+
 function syncBackdrop() {
   const v = $("#backdrop-video");
   if (!v) return;
-  const still = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-  if (S.view === "simple" && !still) v.play().catch(() => { /* autoplay refused: the still frame stays */ });
+  if (backdropShouldPlay()) v.play().catch(() => { /* autoplay refused: the still frame stays */ });
   else v.pause();
+}
+
+/**
+ * Start the loop again after the device stopped it.
+ *
+ * iOS pauses a playing video whenever it likes \u2014 Low Power Mode, an incoming call, the
+ * screen locking, the tab going to the back, the phone simply getting warm \u2014 and nothing
+ * here ever asked it to start again: syncBackdrop ran only when the view changed. So on
+ * an iPhone or iPad left open on the simple page the backdrop stopped after a minute or
+ * two and stayed stopped for the rest of the session.
+ *
+ * The run poller had the same hole from the other side. Safari suspends timers in a
+ * backgrounded tab and does not promise to resume them, so a build watched on a phone
+ * could sit at "Drafting" long after it had finished.
+ *
+ * retries is there because the fix must not turn into a fight: if the device is refusing
+ * to play (Low Power Mode does refuse), asking once per pause forever would keep the
+ * radio and the decoder awake to no purpose. A few attempts, then leave the poster up.
+ */
+let backdropRetries = 0;
+
+function resumeAfterSuspend() {
+  if (document.visibilityState !== "visible") return;
+  backdropRetries = 0;
+  syncBackdrop();
+  // A poll that was suspended mid-run is restarted; one that finished is not.
+  if (S.run && RUNNING.has(S.run.state) && !S.pollTimer) startPolling();
+  // The run may well have moved on while the screen was off.
+  if (S.run) refreshRun();
+}
+
+/** Re-read the current run once, outside the polling loop. */
+async function refreshRun() {
+  try {
+    S.run = await api(`/api/runs/${encodeURIComponent(S.run.runId)}`);
+  } catch { return; }
+  await loadStatus();
+  render();
+}
+
+function watchBackdrop() {
+  const v = $("#backdrop-video");
+  if (!v) return;
+  v.addEventListener("pause", () => {
+    // Only when it should be running: switching to the detailed view pauses it on purpose.
+    if (!backdropShouldPlay() || backdropRetries >= 3) return;
+    backdropRetries += 1;
+    setTimeout(() => { if (backdropShouldPlay()) v.play().catch(() => {}); }, 400);
+  });
+  v.addEventListener("playing", () => { backdropRetries = 0; });
 }
 
 /** Paints the active view. The only render entry point anything else should call. */
@@ -1306,6 +1363,13 @@ function toast(msg) {
 
 function boot() {
   $$(".segmented button").forEach((b) => b.addEventListener("click", () => setMode(b.dataset.mode)));
+
+  // A phone stops the video and suspends the timers without telling the page; these are
+  // the only three moments it admits to being back. pageshow covers a restore from the
+  // back-forward cache, which visibilitychange does not fire for.
+  watchBackdrop();
+  document.addEventListener("visibilitychange", resumeAfterSuspend);
+  window.addEventListener("pageshow", resumeAfterSuspend);
 
   // ----------------------------------------------------------------- views
   $$(".view-switch button").forEach((b) => b.addEventListener("click", () => setView(b.dataset.view)));
