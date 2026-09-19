@@ -137,15 +137,25 @@ function headers(g: Gateway): Record<string, string> {
  * is down from one that rejects our key, because the fixes are different — one is a
  * restart, the other is a line in .env.
  */
-export async function probeGateway(timeoutMs = 4000): Promise<{ up: boolean; authorised: boolean; status?: number }> {
+export async function probeGateway(
+  timeoutMs = 4000,
+): Promise<{ up: boolean; authorised: boolean; status?: number; error?: string }> {
   const g = gateway();
+  // A missing key looks identical to a dead gateway once the request has failed, and on a
+  // hosted deploy it is by far the likelier of the two. Say so before spending the timeout.
+  if (!g.apiKey) {
+    const varName = g.name === "kilo" ? "KILO_API_KEY" : "OMNIROUTE_API_KEY";
+    return { up: false, authorised: false, error: `${varName} is not set in this environment` };
+  }
   const ctl = new AbortController();
   const t = setTimeout(() => ctl.abort(), timeoutMs);
   try {
     const r = await fetch(`${g.baseUrl}/models`, { headers: headers(g), signal: ctl.signal });
     return { up: true, authorised: r.status !== 401 && r.status !== 403, status: r.status };
-  } catch {
-    return { up: false, authorised: false };
+  } catch (e) {
+    const why =
+      e instanceof Error ? (e.name === "AbortError" ? `no response within ${timeoutMs}ms` : e.message) : String(e);
+    return { up: false, authorised: false, error: why };
   } finally {
     clearTimeout(t);
   }
@@ -322,6 +332,8 @@ export async function routerStatus(): Promise<{
   gatewayName: string;
   gatewayUp: boolean;
   gatewayAuthorised: boolean;
+  /** Why the probe failed. Present only when the gateway is not usable. */
+  gatewayError?: string;
   ladder: string[];
   /** Ladder rungs the gateway does not currently list as free. Non-empty is a warning. */
   notFree: string[];
@@ -339,6 +351,7 @@ export async function routerStatus(): Promise<{
     gatewayName: g.name,
     gatewayUp: p.up,
     gatewayAuthorised: p.authorised,
+    gatewayError: p.error,
     ladder: g.ladder,
     notFree: models.length ? g.ladder.filter((m) => !free.has(m)) : [],
     paidFallback: paidFallbackAllowed() && Boolean(process.env.ANTHROPIC_API_KEY),

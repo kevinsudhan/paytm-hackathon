@@ -23,7 +23,7 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { loadEnv, manifestConfig } from "./env.js";
 import { routerStatus, liveModel } from "./router.js";
-import { buildManifest } from "./manifest.js";
+import { buildManifest, blindSpots } from "./manifest.js";
 import { readTemplate, type Template } from "./fork.js";
 import { startFork, clarifyFork, decideFork, buildFork, getForkRun, listForkRuns, ForkStateError, type ForkRun } from "./forkRun.js";
 import { analyseRequest, decide as decideExtend, getRun as getExtendRun, StateError } from "./orchestrator.js";
@@ -108,17 +108,22 @@ app.get("/api/status", wrap(async (req, res) => {
 // --------------------------------------------------------------------------- template
 
 /** Reading the template touches four live services; the sidebar does not need it fresher than this. */
-let templateCache: { at: number; value: Template } | null = null;
+let templateCache: { at: number; value: Template; blind: string[] } | null = null;
 
 app.get("/api/template", wrap(async (req, res) => {
   if (!templateCache || Date.now() - templateCache.at > 120_000 || req.query.refresh === "1") {
-    templateCache = { at: Date.now(), value: readTemplate(await buildManifest(manifestConfig(root)), root) };
+    const m = await buildManifest(manifestConfig(root));
+    templateCache = { at: Date.now(), value: readTemplate(m, root), blind: blindSpots(m) };
   }
   const t = templateCache.value;
   res.json({
     id: t.id,
     label: t.label,
     observed: t.observed,
+    // Why each unobserved section could not be read. `observed: false` on its own is a
+    // dead end from outside the process — on a hosted deploy the cause is almost always a
+    // named environment variable, and the manifest already knows which one.
+    blindSpots: templateCache.blind,
     readAt: new Date(templateCache.at).toISOString(),
     lifecycle: t.vertical.lifecycle.order,
     tables: t.tables.map((x) => ({ name: x.name, note: x.note, columns: x.columns.length })),
