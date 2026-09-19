@@ -126,7 +126,7 @@ function renderModel() {
   if (st.inFlight) {
     dot.classList.add("busy");
     name.textContent = shortModel(st.inFlight.model);
-    via.textContent = `drafting · ${since(st.inFlight.since)}`;
+    via.textContent = `via ${gw}`;
     tag.hidden = !isFree(st.inFlight.model);
   } else if (st.last) {
     dot.classList.add(reachable ? "ok" : "bad");
@@ -316,10 +316,10 @@ function render() {
    The machine's own names (READING_TEMPLATE, BLUEPRINT_READY) are exact and
    are what the detailed view shows; here they would only be noise. */
 const SIMPLE_PHASES = [
-  { key: "read",     label: "Laying the foundations" },
-  { key: "draft",    label: "Drafting the blueprint" },
-  { key: "check",    label: "Checking it against the kernel" },
-  { key: "ready",    label: "Ready for your decision" },
+  { key: "read",     label: "Laying the foundations",        short: "Reading" },
+  { key: "draft",    label: "Drafting the blueprint",        short: "Drafting" },
+  { key: "check",    label: "Checking it against the kernel", short: "Checking" },
+  { key: "ready",    label: "Ready for your decision",       short: "Ready" },
 ];
 
 const PHASE_OF = {
@@ -374,15 +374,30 @@ function renderSimple() {
     const done = !failed && (phase > i || (phase === i && !busy));
     const now = phase === i && busy;
     const cls = failed && phase === i ? "bad" : done ? "done" : now ? "now" : "";
-    const detail = now && i === 1 && S.status && S.status.inFlight ? shortModel(S.status.inFlight.model) : "";
     return `<li class="${cls}">
       <span class="tick">${done ? "&#10003;" : now ? '<span class="spinner"></span>' : failed && phase === i ? "&times;" : ""}</span>
       <span class="grow">${esc(p.label)}</span>
-      ${detail ? `<span class="muted small mono">${esc(detail)}</span>` : ""}
     </li>`;
   }).join("");
 
   const parts = [`<div class="said">${esc(run.request)}</div>`];
+
+  // One word for what is happening, and a clock that moves.
+  //
+  // The phase list below already says this in full sentences, but it is four static
+  // rows: nothing in it changes for the ninety seconds a draft takes, and a screen
+  // that does not move reads as a screen that has hung. The seconds are the part that
+  // earns its place — they are the only thing on the page that proves it is still alive.
+  if (busy) {
+    const word = (SIMPLE_PHASES[phase] || {}).short || "Working";
+    const started = run.history && run.history.length ? run.history[0].at : null;
+    parts.push(`<div class="live" role="status" aria-live="polite">
+      <span class="spinner"></span>
+      <span class="live-word">${esc(word)}<span class="live-dots" aria-hidden="true"><i></i><i></i><i></i></span></span>
+      ${started ? `<span class="live-meta mono">${esc(since(started))}</span>` : ""}
+    </div>`);
+  }
+
   parts.push(`<ol class="phases">${steps}</ol>`);
 
   if (failed) {
