@@ -24,6 +24,9 @@ const S = {
   build: null,
   buildTab: "lifecycle",
   apps: {},
+  // "simple" | "detailed". Both views render the same S.run, so switching
+  // during a build is a repaint rather than a restart.
+  view: (() => { try { return localStorage.getItem("araxys.view") || "simple"; } catch { return "simple"; } })(),
 };
 
 const RUNNING = new Set(["REQUEST_RECEIVED", "READING_TEMPLATE", "DRAFTING"]);
@@ -236,7 +239,7 @@ async function openRun(id) {
   setMode("fork", false);
   S.tab = "overview";
   S.file = null;
-  renderRun();
+  render();
   if (RUNNING.has(S.run.state)) startPolling();
   loadRuns();
 }
@@ -249,7 +252,7 @@ function startPolling() {
       S.run = await api(`/api/runs/${encodeURIComponent(S.run.runId)}`);
     } catch { return; }
     await loadStatus();
-    renderRun();
+    render();
     if (!RUNNING.has(S.run.state)) {
       stopPolling();
       loadRuns();
@@ -262,19 +265,190 @@ function stopPolling() {
   S.pollTimer = null;
 }
 
+// ------------------------------------------------------------------------- views
+
+/**
+ * Simple and detailed are two renderings of one run, not two flows.
+ *
+ * Everything that mutates state — startFork, the poller, approve, build —
+ * finishes by calling render(), which paints whichever view is showing. That is
+ * what makes switching mid-build free: there is no per-view run to reconcile,
+ * and the other view was never rendering in the first place.
+ */
+function setView(view, remember = true) {
+  S.view = view;
+  if (remember) { try { localStorage.setItem("araxys.view", view); } catch { /* private mode */ } }
+  $$(".view-switch button").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.view === view)));
+  document.body.classList.toggle("is-simple", view === "simple");
+  document.body.classList.toggle("is-detailed", view === "detailed");
+  render();
+}
+
+/** Paints the active view. The only render entry point anything else should call. */
+function render() {
+  if (S.view === "simple") renderSimple();
+  else if (S.mode === "fork") { if (S.build) renderBuild(); else renderRun(); }
+  else renderExtend();
+}
+
+/* The states a person actually cares about, in the words they would use.
+   The machine's own names (READING_TEMPLATE, BLUEPRINT_READY) are exact and
+   are what the detailed view shows; here they would only be noise. */
+const SIMPLE_PHASES = [
+  { key: "read",     label: "Reading the logistics template" },
+  { key: "draft",    label: "Drafting the blueprint" },
+  { key: "check",    label: "Checking it against the kernel" },
+  { key: "ready",    label: "Ready for your decision" },
+];
+
+const PHASE_OF = {
+  REQUEST_RECEIVED: 0, READING_TEMPLATE: 0,
+  DRAFTING: 1,
+  CLARIFICATION_REQUIRED: 2,
+  BLUEPRINT_READY: 3, WAITING_FOR_APPROVAL: 3,
+  APPROVED: 4, BUILT: 4,
+};
+
+/**
+ * Which phase the run is at, and on a failure which phase it died in.
+ *
+ * A terminal FAILED carries no phase of its own, so the phase comes from the
+ * last state that had one. Without this every row renders as never-started and
+ * the reader is told a run that clearly got as far as drafting never began —
+ * which is worse than saying nothing, because it is wrong about where to look.
+ */
+function simplePhase(run) {
+  const direct = PHASE_OF[run.state];
+  if (direct !== undefined) return direct;
+  const last = [...(run.history || [])].reverse().find((h) => PHASE_OF[h.state] !== undefined);
+  if (!last) return 0;
+  // A draft that fails validation died in "checking", not in "drafting".
+  return last.state === "DRAFTING" ? 2 : PHASE_OF[last.state];
+}
+
+function renderSimple() {
+  const run = S.run;
+  const head = $("#simple-head"), ask = $("#ask"), ex = $("#ask-examples"), foot = $("#ask-foot");
+  const el = $("#simple-run");
+  const busy = run && RUNNING.has(run.state);
+
+  // The composer stays put until there is something to show under it.
+  const showAsk = !run;
+  head.hidden = !showAsk;
+  ex.hidden = !showAsk;
+  foot.hidden = !showAsk;
+  ask.classList.toggle("compact", !showAsk);
+
+  if (!run) { el.hidden = true; return; }
+  el.hidden = false;
+
+  const phase = simplePhase(run);
+  const failed = run.state === "FAILED" || run.state === "ANALYSIS_FAILED";
+
+  const steps = SIMPLE_PHASES.map((p, i) => {
+    // Arrived-but-not-running counts as reached: at WAITING_FOR_APPROVAL the
+    // last row IS the state you are in, and leaving it blank reads as "never
+    // got there" while the decision sits right below it.
+    const done = !failed && (phase > i || (phase === i && !busy));
+    const now = phase === i && busy;
+    const cls = failed && phase === i ? "bad" : done ? "done" : now ? "now" : "";
+    const detail = now && i === 1 && S.status && S.status.inFlight ? shortModel(S.status.inFlight.model) : "";
+    return `<li class="${cls}">
+      <span class="tick">${done ? "&#10003;" : now ? '<span class="spinner"></span>' : failed && phase === i ? "&times;" : ""}</span>
+      <span class="grow">${esc(p.label)}</span>
+      ${detail ? `<span class="muted small mono">${esc(detail)}</span>` : ""}
+    </li>`;
+  }).join("");
+
+  const parts = [`<div class="said">${esc(run.request)}</div>`];
+  parts.push(`<ol class="phases">${steps}</ol>`);
+
+  if (failed) {
+    parts.push(`<div class="callout bad"><div class="callout-title">It stopped</div><div>${esc(run.error || "The run failed.")}</div></div>`);
+  } else if (run.state === "CLARIFICATION_REQUIRED") {
+    const qs = (run.draft && run.draft.questions || []).filter((q) => q.blocks === "structure");
+    parts.push(`<div class="outcome">
+      <h3>A few things change what gets built</h3>
+      <ul class="qlist">${qs.map((q) => `<li><span class="badge warn">structure</span><span>${esc(q.question)}</span></li>`).join("")}</ul>
+      <div class="act"><button class="btn ghost" data-goto="detailed">Answer them</button></div>
+    </div>`);
+  } else if (run.blueprint) {
+    // The vertical lives on the draft's spec, not on the blueprint — the
+    // blueprint carries the file list, tally and warnings.
+    const bp = run.blueprint, v = run.draft && run.draft.spec && run.draft.spec.vertical;
+    if (!v) { el.innerHTML = parts.join(""); return; }
+    const built = run.state === "BUILT";
+    parts.push(`<div class="outcome">
+      <div class="outcome-top">
+        <div>
+          <h3>${esc(v.label)}</h3>
+          <div class="muted small">${esc(v.business.name)} · ${esc(v.business.currency)} · ${esc(v.business.timezone)}</div>
+        </div>
+        ${built ? '<span class="badge ok">built</span>' : '<span class="badge warn">awaiting approval</span>'}
+      </div>
+      <div class="figures">
+        <div><b>${v.lifecycle.order.length}</b><span>stages</span></div>
+        <div><b>${bp.tally.REUSE}</b><span>reused</span></div>
+        <div><b>${bp.tally.CLONE}</b><span>cloned</span></div>
+        <div><b>${bp.tally.NEEDS_PERSON || 0}</b><span>need a person</span></div>
+      </div>
+      <div class="chain">${v.lifecycle.order.map((x, i) => `${i ? '<span class="arrow">&rsaquo;</span>' : ""}<span class="st">${esc(x)}</span>`).join("")}</div>
+      ${(() => {
+        const qs = (run.draft && run.draft.questions) || [];
+        const warn = (bp.warnings || []).length;
+        if (!qs.length && !warn) return "";
+        const bits = [];
+        if (qs.length) bits.push(`${qs.length} question${qs.length === 1 ? "" : "s"} carried as assumptions`);
+        if (warn) bits.push(`${warn} thing${warn === 1 ? "" : "s"} to read before approving`);
+        return `<button class="carried" data-goto="detailed">${esc(bits.join(" · "))}<span class="arrow">&rsaquo;</span></button>`;
+      })()}
+      ${built
+        ? `<div class="act">
+             ${appControl(run.buildDir ? run.buildDir.split("/").pop() : "")}
+             <button class="btn ghost" data-goto="detailed">See everything it wrote</button>
+           </div>`
+        : `<div class="act">
+             <input type="text" id="s-approver" placeholder="Your name" />
+             <button class="btn primary" id="s-approve">Approve &amp; build</button>
+             <button class="btn ghost" data-goto="detailed">Review it first</button>
+           </div>`}
+    </div>`);
+  }
+
+  parts.push(`<div class="restart"><button class="btn ghost small" id="s-new">Start something else</button></div>`);
+  el.innerHTML = parts.join("");
+
+  $$("#simple-run [data-goto]").forEach((b) => b.addEventListener("click", () => setView(b.dataset.goto)));
+  const ap = $("#s-approve");
+  if (ap) ap.addEventListener("click", () => {
+    const name = ($("#s-approver").value || "").trim();
+    if (!name) return toast("Put your name on the approval — it goes in the ledger.");
+    decide(true, name);
+  });
+  const nu = $("#s-new");
+  if (nu) nu.addEventListener("click", () => { S.run = null; S.build = null; stopPolling(); $("#ask-input").value = ""; render(); $("#ask-input").focus(); });
+  bindAppControls(render);
+}
+
 // ---------------------------------------------------------------------- fork run
 
-async function startFork() {
+async function startFork(requestArg, forceArg) {
   S.build = null;
-  const request = $("#request").value.trim();
+  // Either composer can start a run; the run itself is identical.
+  const request = (requestArg ?? $("#request").value).trim();
   if (request.length < 10) return toast("Describe the business in at least a sentence.");
+  // The simple view always carries open questions as assumptions. Sending someone
+  // to another screen to answer fifteen clarifications is the opposite of what
+  // that view is for — and the assumptions are still listed on the result, so
+  // nothing is hidden, only deferred.
+  const force = forceArg ?? $("#force").checked;
   const btn = $("#go");
   btn.disabled = true;
   try {
-    S.run = await post("/api/fork", { request, force: $("#force").checked });
+    S.run = await post("/api/fork", { request, force });
     S.tab = "overview";
     S.file = null;
-    renderRun();
+    render();
     startPolling();
     loadRuns();
   } catch (e) {
@@ -580,14 +754,16 @@ function bindRun() {
   if (skip) skip.addEventListener("click", () => clarify(true));
 }
 
-async function decide(approve) {
-  const by = ($("#approver") && $("#approver").value.trim()) || "";
+async function decide(approve, byArg) {
+  // The approver may come from either view's field. It is recorded either way:
+  // the ledger entry is the point of the gate.
+  const by = (byArg || ($("#approver") && $("#approver").value.trim()) || "").trim();
   if (!by) return toast("Add your name — approval is recorded with it.");
   store("builder.approver", by);
   try {
     S.run = await post(`/api/fork/${encodeURIComponent(S.run.runId)}/decide`, { approve, by });
     if (approve) return buildRun();
-    renderRun();
+    render();
     loadRuns();
   } catch (e) { toast(e.message); }
 }
@@ -598,7 +774,7 @@ async function buildRun() {
     S.tab = "files";
     S.file = "BUILD.md";
     await loadApps();
-    renderRun();
+    render();
     loadRuns();
     loadBuilds();
   } catch (e) { toast(e.message); }
@@ -911,6 +1087,26 @@ function toast(msg) {
 
 function boot() {
   $$(".segmented button").forEach((b) => b.addEventListener("click", () => setMode(b.dataset.mode)));
+
+  // ----------------------------------------------------------------- views
+  $$(".view-switch button").forEach((b) => b.addEventListener("click", () => setView(b.dataset.view)));
+
+  const ask = $("#ask"), askIn = $("#ask-input");
+  ask.addEventListener("submit", (e) => { e.preventDefault(); startFork(askIn.value, true); });
+  // Enter sends, Shift+Enter is a newline — the convention people already have
+  // for this shape of box. Ctrl/Cmd+Enter also works, matching the other composer.
+  askIn.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); startFork(askIn.value, true); }
+  });
+  // Grow with the text rather than scrolling a three-line window.
+  const grow = () => { askIn.style.height = "auto"; askIn.style.height = Math.min(askIn.scrollHeight, 260) + "px"; };
+  askIn.addEventListener("input", grow);
+  $("#ask-examples").innerHTML = EXAMPLES.fork.map(([label], i) => `<button type="button" class="chip" data-ex="${i}">${esc(label)}</button>`).join("");
+  $$("#ask-examples [data-ex]").forEach((b) => b.addEventListener("click", () => {
+    askIn.value = EXAMPLES.fork[Number(b.dataset.ex)][1]; grow(); askIn.focus();
+  }));
+  $("#home").addEventListener("click", (e) => { e.preventDefault(); setView("simple"); });
+
   $("#go").addEventListener("click", () => (S.mode === "fork" ? startFork() : startExtend()));
   $("#request").addEventListener("keydown", (e) => {
     if ((e.ctrlKey || e.metaKey) && e.key === "Enter") $("#go").click();
@@ -932,6 +1128,7 @@ function boot() {
   if (deep) openBuild(deep[1]);
 
   setMode("fork", false);
+  setView(S.view, false);
   loadStatus();
   loadTemplate();
   loadRuns();

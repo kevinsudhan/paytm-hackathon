@@ -16,16 +16,19 @@
 <body>
   <header class="topbar">
     <div class="brand">
-      <span class="mark" aria-hidden="true">
-        <svg viewBox="0 0 32 32"><path d="M9 22l7-13 7 13M12 17h8" /></svg>
-      </span>
+      <a class="wordmark" href="#" id="home" aria-label="Araxys Builder — home"></a>
+      <span class="brand-div" aria-hidden="true"></span>
       <div>
-        <div class="brand-name">Araxys Builder</div>
+        <div class="brand-name">Builder</div>
         <div class="brand-sub">New businesses from the logistics template</div>
       </div>
     </div>
 
     <div class="topbar-right">
+      <div class="view-switch" role="tablist" aria-label="View">
+        <button role="tab" aria-selected="true"  data-view="simple"   id="view-simple">Simple</button>
+        <button role="tab" aria-selected="false" data-view="detailed" id="view-detailed">Detailed</button>
+      </div>
       <div class="tokens" id="session-tokens" title="Tokens spent by drafts in this browser session">
         <span class="k">Session</span> <b id="session-tokens-n">0</b> <span class="muted">tokens</span>
       </div>
@@ -50,6 +53,31 @@
       </div>
     </div>
   </header>
+
+  <!-- ============================ SIMPLE VIEW ============================
+       One column, one question. It renders the same S.run as the detailed
+       view, so a build started here is the same build there and switching
+       mid-flight loses nothing. -->
+  <main class="simple" id="simple">
+    <div class="simple-inner">
+      <div class="simple-head" id="simple-head">
+        <span class="wordmark lg" aria-label="Araxys"></span>
+        <p class="simple-tag">Describe a business. It gets built from the logistics template.</p>
+      </div>
+
+      <form class="ask" id="ask" autocomplete="off">
+        <textarea id="ask-input" rows="1" placeholder="A dental clinic in Chennai that books appointments by phone…"></textarea>
+        <button class="ask-go" id="ask-go" type="submit" aria-label="Build this">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 13V3M3.5 7.5L8 3l4.5 4.5"/></svg>
+        </button>
+      </form>
+
+      <div class="ask-examples" id="ask-examples"></div>
+      <div class="ask-foot" id="ask-foot">One call to a free model. Everything after that is generated without one.</div>
+
+      <section class="simple-run" id="simple-run" hidden></section>
+    </div>
+  </main>
 
   <div class="layout">
     <aside class="sidebar">
