@@ -29,17 +29,45 @@ import { startFork, clarifyFork, decideFork, buildFork, getForkRun, listForkRuns
 import { analyseRequest, decide as decideExtend, getRun as getExtendRun, StateError } from "./orchestrator.js";
 import { accessEnv, accessFrom, guard, lanLinks } from "./access.js";
 import { deploy, readRecord, servicesFromEnv, undeploy } from "./deploy.js";
+import { AppError, createApp } from "../app-runtime/app.js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 loadEnv(root);
 
-const PORT = Number(process.env.BUILDER_WEB_PORT ?? 8790);
-const access = accessFrom(process.env, process.argv, join(root, "builds", ".lan-key"));
+/*
+ * PUBLIC MODE (--public, or BUILDER_PUBLIC=1) is for hosting the builder for a demo: its
+ * pages on Netlify, this server on Render (docs/HOSTING.md). It listens on the host's
+ * PORT, answers anyone — no key, by decision: the hosting is for a hackathon and comes
+ * down after it — lets the Netlify site call it (BUILDER_ALLOWED_ORIGINS), and serves every
+ * built app itself at /apps/<build>/ instead of starting a process per app, since a host
+ * gives a service one public port.
+ */
+const PUBLIC = process.argv.includes("--public") || process.env.BUILDER_PUBLIC === "1";
+// Locally .env's PORT is SHIPMATE's, so only a hosted builder takes PORT.
+const PORT = Number(process.env.BUILDER_WEB_PORT ?? (PUBLIC ? process.env.PORT : undefined) ?? 8790);
+const access = PUBLIC ? { lan: false, key: "", listenHost: "0.0.0.0" } : accessFrom(process.env, process.argv, join(root, "builds", ".lan-key"));
 const HOST = access.listenHost;
+/** Where this builder is reachable, when hosted: Render sets RENDER_EXTERNAL_URL itself. */
+const PUBLIC_URL = (process.env.BUILDER_PUBLIC_URL ?? process.env.RENDER_EXTERNAL_URL ?? "").replace(/\/$/, "") || null;
 
 const app = express();
 app.disable("x-powered-by");
-app.use(guard(access, "The builder"));
+
+const origins = (process.env.BUILDER_ALLOWED_ORIGINS ?? "").split(",").map((s) => s.trim().replace(/\/$/, "")).filter(Boolean);
+if (origins.length) {
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    const o = req.headers.origin;
+    if (o && (origins.includes(o) || origins.includes("*"))) {
+      res.setHeader("Access-Control-Allow-Origin", o);
+      res.setHeader("Vary", "Origin");
+      res.setHeader("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS");
+      res.setHeader("Access-Control-Allow-Headers", "Content-Type, x-desk-user");
+      if (req.method === "OPTIONS") return void res.sendStatus(204);
+    }
+    next();
+  });
+}
+if (!PUBLIC) app.use(guard(access, "The builder"));
 app.use(express.json({ limit: "256kb" }));
 
 app.use((req: Request, res: Response, next: NextFunction) => {
@@ -337,8 +365,14 @@ async function freePort(name: string): Promise<number> {
 app.get("/api/apps", wrap(async (_req, res) => {
   if (!existsSync(BUILDS)) return res.json({});
   const names = readdirSync(BUILDS, { withFileTypes: true }).filter((e) => e.isDirectory() && BUILD_NAME.test(e.name)).map((e) => e.name);
-  const out: Record<string, { running: boolean; port?: number; hasApp: boolean }> = {};
+  const out: Record<string, { running: boolean; port?: number; path?: string; hasApp: boolean }> = {};
   for (const n of names) {
+    if (PUBLIC) {
+      // Served by this process at /apps/<build>/ — always there when it has an app.
+      const hasApp = existsSync(join(BUILDS, n, "app.json"));
+      out[n] = { running: hasApp, path: hasApp ? `/apps/${n}/` : undefined, hasApp };
+      continue;
+    }
     const s = await appStatus(n);
     out[n] = { running: usable(s), port: s.port, hasApp: existsSync(join(BUILDS, n, "app.json")) };
   }
@@ -353,6 +387,10 @@ app.post("/api/builds/:name/launch", wrap(async (req, res) => {
   }
   if (!existsSync(join(root, "apps", "crm-shell", "dist", "index.html"))) {
     return res.status(409).json({ error: "the app frontend has not been built — run npm run app:ui once" });
+  }
+  if (PUBLIC) {
+    mounted(name); // throws, as a 500 with the reason, if the build cannot run
+    return res.json({ running: true, path: `/apps/${name}/` });
   }
   const now = await appStatus(name);
   if (usable(now)) return res.json({ running: true, port: now.port });
@@ -419,6 +457,8 @@ app.get("/api/builds/:name/deployment", wrap(async (req, res) => {
     configured: { n8n: !!s.n8n, snapserve: !!s.snapserve, cognee: !!s.cognee },
     n8nBase: s.n8n?.base ?? null,
     busy: deploying.has(param(req, "name")),
+    // A hosted builder serves the app publicly, which is the URL n8n needs to go live.
+    publicAppUrl: PUBLIC && PUBLIC_URL ? `${PUBLIC_URL}/apps/${param(req, "name")}` : null,
   });
 }));
 
@@ -455,6 +495,34 @@ app.post("/api/builds/:name/undeploy", wrap(async (req, res) => {
   }
 }));
 
+// ------------------------------------------------------------- apps, when hosted
+/*
+ * In public mode each built app is served by this process at /apps/<build>/ — the same
+ * app.ts a local app listens with, mounted instead of spawned. Created on first request and
+ * kept, so its memory batching and knowledge refresh run for as long as the builder does.
+ */
+const apps = new Map<string, ReturnType<typeof createApp>["handler"]>();
+function mounted(name: string) {
+  let h = apps.get(name);
+  if (!h) {
+    h = createApp(join(BUILDS, name), { root, basePath: `/apps/${name}/` }).handler;
+    apps.set(name, h);
+  }
+  return h;
+}
+
+if (PUBLIC) {
+  app.use("/apps/:name", (req: Request, res: Response, next: NextFunction) => {
+    const name = param(req, "name");
+    if (!BUILD_NAME.test(name) || !existsSync(join(BUILDS, name, "app.json"))) return void res.status(404).json({ error: "no such app" });
+    // The page's relative paths resolve against /apps/<build>/ — with the slash.
+    if (req.originalUrl.split("?")[0] === `/apps/${name}`) return void res.redirect(301, `/apps/${name}/${req.originalUrl.slice(`/apps/${name}`.length)}`);
+    try { mounted(name)(req, res, next); } catch (e) {
+      res.status(500).json({ error: e instanceof AppError ? e.message : String(e) });
+    }
+  });
+}
+
 // ---------------------------------------------------------------------------- static
 
 // no-cache means "revalidate", not "never store": the page is a few files that change as
@@ -473,6 +541,11 @@ app.listen(PORT, HOST, (err?: Error) => {
   if (err) {
     console.error(`\nCould not listen on ${HOST}:${PORT} — ${err.message}\nIs another builder already running?\n`);
     process.exit(1);
+  }
+  if (PUBLIC) {
+    console.log(`\nBuilder on ${PUBLIC_URL ?? `http://0.0.0.0:${PORT}`} — PUBLIC: anyone with the link can use it. Apps at /apps/<build>/.`);
+    console.log(origins.length ? `Pages allowed to call it: ${origins.join(", ")}\n` : "No BUILDER_ALLOWED_ORIGINS — only pages served by this server can call it.\n");
+    return;
   }
   if (!access.lan) {
     console.log(`\nBuilder UI on http://127.0.0.1:${PORT}  (this machine only — npm run builder:lan to open it to this network)\n`);

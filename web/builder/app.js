@@ -50,8 +50,15 @@ function esc(v) {
   return String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
+/*
+ * Where the builder's server is. Empty when this page is served by it; the builder's URL
+ * when the page is hosted elsewhere (Netlify) — config.js is written at deploy time
+ * from BUILDER_API_URL (scripts/netlify-config.mjs).
+ */
+const API = String(window.ARAXYS_API || "").replace(/\/$/, "");
+
 async function api(path, opts = {}) {
-  const r = await fetch(path, {
+  const r = await fetch(API + path, {
     ...opts,
     headers: { "Content-Type": "application/json", ...(opts.headers || {}) },
   });
@@ -817,17 +824,19 @@ async function loadApps() {
  * builder starts it and links to it, and never shows it inside this page.
  */
 /**
- * An app's address as this browser reaches it: the host this page came from, on the
- * app's port. On the laptop that is 127.0.0.1; on a tablet it is the laptop's address.
+ * An app's address as this browser reaches it. A hosted builder serves apps itself, at a
+ * path on its own address. A local one runs each on its own port, on the host this page
+ * came from — 127.0.0.1 on the laptop, the laptop's address on a tablet.
  */
-function appUrl(port) {
-  return `${location.protocol}//${location.hostname}:${port}/`;
+function appUrl(a) {
+  if (a.path) return `${API || location.origin}${a.path}`;
+  return `${location.protocol}//${location.hostname}:${a.port}/`;
 }
 
 function appControl(name) {
   const a = S.apps[name] || {};
-  if (a.running && a.port) {
-    const url = appUrl(a.port);
+  if (a.running && (a.path || a.port)) {
+    const url = appUrl(a);
     return `<span class="app-ctl"><a class="btn primary small" href="${esc(url)}" target="_blank" rel="noopener">Open app ↗</a><span class="mono small muted">${esc(url)}</span></span>`;
   }
   if (a.hasApp === false) {
@@ -848,7 +857,7 @@ function bindAppControls(rerender) {
     try {
       const st = await post(`/api/builds/${encodeURIComponent(name)}/launch`, {});
       S.apps[name] = { ...(S.apps[name] || {}), ...st, hasApp: true };
-      if (st.port && tab) tab.location.href = appUrl(st.port);
+      if ((st.path || st.port) && tab) tab.location.href = appUrl(st);
       else if (tab) tab.close();
     } catch (e) {
       if (tab) tab.close();
@@ -871,7 +880,7 @@ async function loadBuilds() {
   el.innerHTML = builds
     .map((b) => `<li><button type="button" data-build="${esc(b.name)}" class="${S.build && S.build.name === b.name ? "active" : ""}">
       <span class="r-title">${esc(b.business || b.label)}</span>
-      <span class="r-meta"><span class="badge ok">${esc(b.id)}</span>${S.apps[b.name] && S.apps[b.name].running ? `<span class="badge accent">live :${S.apps[b.name].port}</span>` : ""}<span>${b.states ?? "?"} states</span><span>${new Date(b.builtAt).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}</span></span>
+      <span class="r-meta"><span class="badge ok">${esc(b.id)}</span>${S.apps[b.name] && S.apps[b.name].running ? `<span class="badge accent">live${S.apps[b.name].port ? ` :${S.apps[b.name].port}` : ""}</span>` : ""}<span>${b.states ?? "?"} states</span><span>${new Date(b.builtAt).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}</span></span>
     </button></li>`)
     .join("");
 }
@@ -1058,7 +1067,7 @@ function deployPanel(name) {
 
   parts.push(`<div class="group"><h3>${r ? "Deploy again" : "Deploy"}</h3>
     <div class="act" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-      <input type="text" id="d-url" placeholder="Public app URL (optional, https://…)" value="${esc((r && r.appUrl) || "")}" style="flex:1;min-width:220px" class="input" />
+      <input type="text" id="d-url" placeholder="Public app URL (optional, https://…)" value="${esc((r && r.appUrl) || info.publicAppUrl || "")}" style="flex:1;min-width:220px" class="input" />
       <button class="btn ghost" id="d-preview" ${d.busy ? "disabled" : ""}>Preview</button>
     </div></div>`);
 

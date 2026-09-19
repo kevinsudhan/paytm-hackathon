@@ -27,6 +27,7 @@ node scripts/wire-agent-webhook.mjs <url> [--apply]
 
 npm run builder:web       # builder UI on http://127.0.0.1:8790 (loopback only)
 npm run builder:lan       # same, also on this network for devices with the access key (builds/.lan-key)
+npm run builder:public    # hosted mode (Render): $PORT, no key, CORS for BUILDER_ALLOWED_ORIGINS, apps at /apps/<build>/ — docs/HOSTING.md
 npm run deploy -- <build>                      # plan a build's deployment to Cognee, SnapServe, n8n (GETs only)
 npm run deploy -- <build> --apply --by=<name>  # do it; --undeploy [--apply] removes exactly what it made
 npm run fork -- [--force] [--build] "a dental clinic that books by phone"   # new business from the template
@@ -65,6 +66,7 @@ Two modes, one model call each, both on free models:
 Every fork build writes `app.json` (from `src/builder/appManifest.ts`): each table's role comes from the template table it was cloned from (real_records → primary/lifecycle, enquiry_events → events, space_slots → slots, partners → partners…), plus title/stage columns, cross-table links, and `leftover` flags on freight columns the draft carried over. `npm run app -- <build>` serves that build as a standalone app: its own process, port and data (`builds/<name>/data/*.json`, written atomically), and `runtime.json` so the builder can find it. The builder's "Launch app" spawns it detached and only links to it.
 
 - Backend: `engine.ts` runs the kernel via `domain/machine.ts` + `decideFor()` on the build's vertical — the same state machine and policy gate as freight (twin.ts/policy.ts delegate to the same code). Held actions go to an approvals queue; the requester cannot approve their own; approval re-checks legality. Every write needs a desk-user name (`x-desk-user`) and lands in the append-only ledger.
+- `app.ts` is the app as a mountable Express app; `server.ts` listens with it on its own port, and a `--public` builder mounts it at `/apps/<build>/` instead (one public port on a host). The page learns its path from `<base href>` (written by the server), which the shell uses for API calls, the router and assets (`vite base: "./"`).
 - Frontend: `apps/crm-shell` is the logistics CRM's React/Vite/Tailwind shell (layout, theme, MetricCard, StatusPill, RowCard, PageHeader, Brand, the StageAction/Timeline patterns — copied from the `crm-v1` branch and adapted), with every page driven by `/api/app`. It has its own `package.json`; rebuild with `npm run app:ui` after editing it.
 
 ## Deploying a build (`src/builder/deploy.ts`, `deployContent.ts`, `agentNames.ts`)

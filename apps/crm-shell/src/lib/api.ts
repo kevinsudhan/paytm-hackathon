@@ -3,6 +3,8 @@
  * built business's own server instead of the freight Edge Functions.
  */
 
+import { apiUrl } from "./base";
+
 export type Row = Record<string, unknown>;
 
 export interface Column {
@@ -136,7 +138,7 @@ export function setDeskUser(name: string) {
 }
 
 async function call<T>(path: string, init?: RequestInit): Promise<T> {
-  const r = await fetch(path, {
+  const r = await fetch(apiUrl(path), {
     ...init,
     headers: { "Content-Type": "application/json", ...(deskUser ? { "x-desk-user": deskUser } : {}), ...(init?.headers ?? {}) },
   });

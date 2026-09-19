@@ -1,0 +1,20 @@
+# The builder's pages on Netlify. Its server runs on Render — see docs/HOSTING.md.
+#
+# Netlify serves static files and short functions; the builder's drafts take minutes, it
+# keeps each build on disk and it serves each built app, so the server cannot live here.
+# The pages call it directly at BUILDER_API_URL (set in Netlify's environment variables).
+
+[build]
+  # Only the pages: no npm install of the builder's server dependencies.
+  base = "web/builder"
+  publish = "."
+  command = "node ../../scripts/netlify-config.mjs"
+
+[build.environment]
+  NODE_VERSION = "20"
+
+# The pages change as the builder is worked on — never pair yesterday's app.js with today's HTML.
+[[headers]]
+  for = "/*"
+  [headers.values]
+    Cache-Control = "no-cache"

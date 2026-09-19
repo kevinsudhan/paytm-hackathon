@@ -21,6 +21,7 @@
     "fork": "tsx scripts/fork.ts",
     "builder:web": "tsx src/builder/web.ts",
     "builder:lan": "tsx src/builder/web.ts --lan",
+    "builder:public": "tsx src/builder/web.ts --public",
     "app": "tsx src/app-runtime/server.ts",
     "app:ui": "npm --prefix apps/crm-shell run build"
   },
