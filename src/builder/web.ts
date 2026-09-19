@@ -1,17 +1,18 @@
 /**
  * The builder's web UI and its JSON API.
  *
- *   npm run builder:web      # http://127.0.0.1:8790
+ *   npm run builder:web      # http://127.0.0.1:8790, this machine only
+ *   npm run builder:lan      # also on this network, for devices that have the access key
  *
  * A separate process from src/http/server.ts on purpose. That server is the SHIPMATE API
  * n8n calls, it requires x-shipmate-secret on every route and has no CORS, and none of that
- * should bend to make room for a browser. This one is a local tool: it binds to loopback
- * only, and it holds the same read credentials the builder CLI does (the live schema,
- * n8n, SnapServe) — which is exactly why it must never listen on a public interface.
+ * should bend to make room for a browser. This one is a local tool: by default it binds to
+ * loopback only, and it holds the same read credentials the builder CLI does (the live
+ * schema, n8n, SnapServe) — which is exactly why it must never listen on a public interface.
  *
- * Two guards for a loopback server, both cheap:
- *   - the Host header must be localhost or 127.0.0.1, so a page on another site cannot
- *     reach it through DNS rebinding;
+ * Two guards, both cheap:
+ *   - access.ts: the Host header must name this machine, so a page on another site cannot
+ *     reach it through DNS rebinding; in LAN mode another device also needs the key;
  *   - every POST must be application/json, which a cross-site form cannot send without a
  *     CORS preflight this server never answers.
  */
@@ -26,20 +27,22 @@ import { buildManifest } from "./manifest.js";
 import { readTemplate, type Template } from "./fork.js";
 import { startFork, clarifyFork, decideFork, buildFork, getForkRun, listForkRuns, ForkStateError, type ForkRun } from "./forkRun.js";
 import { analyseRequest, decide as decideExtend, getRun as getExtendRun, StateError } from "./orchestrator.js";
+import { accessEnv, accessFrom, guard, lanLinks } from "./access.js";
+import { deploy, readRecord, servicesFromEnv, undeploy } from "./deploy.js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 loadEnv(root);
 
 const PORT = Number(process.env.BUILDER_WEB_PORT ?? 8790);
-const HOST = "127.0.0.1";
+const access = accessFrom(process.env, process.argv, join(root, "builds", ".lan-key"));
+const HOST = access.listenHost;
 
 const app = express();
 app.disable("x-powered-by");
+app.use(guard(access, "The builder"));
 app.use(express.json({ limit: "256kb" }));
 
 app.use((req: Request, res: Response, next: NextFunction) => {
-  const host = (req.headers.host ?? "").replace(/:\d+$/, "");
-  if (host !== "localhost" && host !== "127.0.0.1") return res.status(421).json({ error: "this server only answers on localhost" });
   if (req.method === "POST" && !req.is("application/json")) return res.status(415).json({ error: "POST bodies must be application/json" });
   next();
 });
@@ -286,20 +289,29 @@ app.get("/api/builds/:name", (req, res) => {
  */
 const APP_PORT_BASE = 8801;
 
-async function appStatus(name: string): Promise<{ running: boolean; port?: number; url?: string }> {
+interface AppStatus { running: boolean; port?: number; url?: string; lan?: boolean; pid?: number }
+
+async function appStatus(name: string): Promise<AppStatus> {
   const file = join(BUILDS, name, "runtime.json");
   if (!existsSync(file)) return { running: false };
-  let rt: { port?: number; url?: string } = {};
+  let rt: { port?: number; pid?: number; lan?: boolean } = {};
   try { rt = JSON.parse(readFileSync(file, "utf-8")); } catch { return { running: false }; }
   if (!rt.port) return { running: false };
   try {
     const r = await fetch(`http://127.0.0.1:${rt.port}/api/health`, { signal: AbortSignal.timeout(1500) });
     const j = (await r.json()) as { build?: string };
     // A port that answers for a different build is not this app.
-    if (r.ok && j.build === name) return { running: true, port: rt.port, url: `http://127.0.0.1:${rt.port}/` };
+    if (r.ok && j.build === name) return { running: true, port: rt.port, url: `http://127.0.0.1:${rt.port}/`, lan: rt.lan === true, pid: rt.pid };
   } catch { /* not answering */ }
   return { running: false, port: rt.port };
 }
+
+/**
+ * In LAN mode an app that was started for this machine only cannot be opened from the
+ * tablet the builder is being used on, so to the builder it is not running: the page
+ * offers Launch, and launching restarts it on the network.
+ */
+const usable = (s: AppStatus) => s.running && (s.lan === true || !access.lan);
 
 /** The first port from 8801 that nothing answers on and no other build has claimed. */
 async function freePort(name: string): Promise<number> {
@@ -325,8 +337,11 @@ async function freePort(name: string): Promise<number> {
 app.get("/api/apps", wrap(async (_req, res) => {
   if (!existsSync(BUILDS)) return res.json({});
   const names = readdirSync(BUILDS, { withFileTypes: true }).filter((e) => e.isDirectory() && BUILD_NAME.test(e.name)).map((e) => e.name);
-  const out: Record<string, Awaited<ReturnType<typeof appStatus>> & { hasApp: boolean }> = {};
-  for (const n of names) out[n] = { ...(await appStatus(n)), hasApp: existsSync(join(BUILDS, n, "app.json")) };
+  const out: Record<string, { running: boolean; port?: number; hasApp: boolean }> = {};
+  for (const n of names) {
+    const s = await appStatus(n);
+    out[n] = { running: usable(s), port: s.port, hasApp: existsSync(join(BUILDS, n, "app.json")) };
+  }
   res.json(out);
 }));
 
@@ -340,25 +355,104 @@ app.post("/api/builds/:name/launch", wrap(async (req, res) => {
     return res.status(409).json({ error: "the app frontend has not been built — run npm run app:ui once" });
   }
   const now = await appStatus(name);
-  if (now.running) return res.json(now);
+  if (usable(now)) return res.json({ running: true, port: now.port });
 
-  const port = await freePort(name);
+  // Running, but for this machine only (see usable). The health check just confirmed that
+  // this port answers for this build, so the pid it recorded is this app's process.
+  if (now.running && now.pid) {
+    try { process.kill(now.pid); } catch { /* already gone */ }
+    for (let i = 0; i < 20 && (await appStatus(name)).running; i++) await new Promise((r) => setTimeout(r, 250));
+  }
+
+  const port = now.running && now.port ? now.port : await freePort(name);
   const log = openSync(join(BUILDS, name, "app.log"), "a");
-  // Detached with its own log: the app outlives the builder, which only started it.
+  // Detached with its own log: the app outlives the builder, which only started it. It
+  // runs in the builder's access mode, with the same key.
   const child = spawn(process.execPath, ["--import", "tsx", join(root, "src", "app-runtime", "server.ts"), name, String(port)], {
     cwd: root,
     detached: true,
     stdio: ["ignore", log, log],
     windowsHide: true,
+    env: { ...process.env, ...accessEnv(access) },
   });
   child.unref();
 
   for (let i = 0; i < 40; i++) {
     await new Promise((r) => setTimeout(r, 250));
     const s = await appStatus(name);
-    if (s.running) return res.json(s);
+    if (usable(s)) return res.json({ running: true, port: s.port });
   }
   res.status(504).json({ error: `the app did not start — see builds/${name}/app.log` });
+}));
+
+// ---------------------------------------------------------------------------- deploy
+/*
+ * Deploying reaches live, shared accounts (n8n, SnapServe, Cognee), so it follows the same
+ * rule as approving a blueprint: a preview first that only reads, and the real thing only
+ * with a name attached. deploy.ts holds the isolation rules; this only routes to it.
+ */
+const deploying = new Set<string>();
+
+function buildDirOf(req: Request): string | null {
+  const name = param(req, "name");
+  return BUILD_NAME.test(name) && existsSync(join(BUILDS, name, "app.json")) ? join(BUILDS, name) : null;
+}
+
+/** A URL n8n Cloud and SnapServe could actually reach — not this machine, not a tunnel. */
+function publicUrl(v: unknown): string | undefined | Error {
+  if (v === undefined || v === null || v === "") return undefined;
+  let u: URL;
+  try { u = new URL(String(v)); } catch { return new Error("the app URL is not a URL"); }
+  if (u.protocol !== "https:") return new Error("the app URL must be https");
+  if (/^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)|trycloudflare\.com$|ngrok/.test(u.hostname)) {
+    return new Error("n8n Cloud and SnapServe cannot reach a private address or a tunnel — host the app publicly first");
+  }
+  return u.origin;
+}
+
+app.get("/api/builds/:name/deployment", wrap(async (req, res) => {
+  const dir = buildDirOf(req);
+  if (!dir) return res.status(404).json({ error: "no such build" });
+  const s = servicesFromEnv();
+  res.json({
+    record: readRecord(dir),
+    configured: { n8n: !!s.n8n, snapserve: !!s.snapserve, cognee: !!s.cognee },
+    n8nBase: s.n8n?.base ?? null,
+    busy: deploying.has(param(req, "name")),
+  });
+}));
+
+app.post("/api/builds/:name/deploy", wrap(async (req, res) => {
+  const dir = buildDirOf(req);
+  if (!dir) return res.status(404).json({ error: "no such build" });
+  const apply = req.body?.apply === true;
+  const by = String(req.body?.by ?? "").trim().slice(0, 60);
+  if (apply && !by) return res.status(400).json({ error: "say who is deploying — it is recorded with the deployment" });
+  const appUrl = publicUrl(req.body?.appUrl);
+  if (appUrl instanceof Error) return res.status(400).json({ error: appUrl.message });
+  const name = param(req, "name");
+  if (deploying.has(name)) return res.status(409).json({ error: "this build is already being deployed" });
+  deploying.add(name);
+  try {
+    res.json(await deploy(dir, servicesFromEnv(), { apply, by: by || "preview", appUrl }));
+  } finally {
+    deploying.delete(name);
+  }
+}));
+
+app.post("/api/builds/:name/undeploy", wrap(async (req, res) => {
+  const dir = buildDirOf(req);
+  if (!dir) return res.status(404).json({ error: "no such build" });
+  const apply = req.body?.apply === true;
+  if (apply && !String(req.body?.by ?? "").trim()) return res.status(400).json({ error: "say who is removing it" });
+  const name = param(req, "name");
+  if (deploying.has(name)) return res.status(409).json({ error: "this build is being deployed" });
+  deploying.add(name);
+  try {
+    res.json({ steps: await undeploy(dir, servicesFromEnv(), { apply }) });
+  } finally {
+    deploying.delete(name);
+  }
 }));
 
 // ---------------------------------------------------------------------------- static
@@ -380,5 +474,14 @@ app.listen(PORT, HOST, (err?: Error) => {
     console.error(`\nCould not listen on ${HOST}:${PORT} — ${err.message}\nIs another builder already running?\n`);
     process.exit(1);
   }
-  console.log(`\nBuilder UI on http://${HOST}:${PORT}  (loopback only)\n`);
+  if (!access.lan) {
+    console.log(`\nBuilder UI on http://127.0.0.1:${PORT}  (this machine only — npm run builder:lan to open it to this network)\n`);
+    return;
+  }
+  const links = lanLinks(access, PORT);
+  console.log(`\nBuilder UI on http://127.0.0.1:${PORT}  (this machine)`);
+  console.log(links.length
+    ? `On a tablet or phone on the same network, open:\n${links.map((l) => `  ${l}`).join("\n")}`
+    : "No network address found — is this machine on Wi-Fi?");
+  console.log(`Access key: ${access.key}  (kept in builds/.lan-key; delete it for a new one)\n`);
 });

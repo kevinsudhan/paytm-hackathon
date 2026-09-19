@@ -59,10 +59,19 @@
        view, so a build started here is the same build there and switching
        mid-flight loses nothing. -->
   <main class="simple" id="simple">
+    <!-- Decoration only: muted, not focusable, hidden from assistive tech.
+         app.js plays it while this view is showing, and not at all for
+         reduced motion. -->
+    <div class="backdrop" aria-hidden="true">
+      <video id="backdrop-video" muted loop playsinline preload="auto" tabindex="-1" disablepictureinpicture disableremoteplayback>
+        <source src="assets/midnight-bloom.webm" type="video/webm" />
+      </video>
+    </div>
+
     <div class="simple-inner">
       <div class="simple-head" id="simple-head">
         <span class="wordmark lg" aria-label="Araxys"></span>
-        <p class="simple-tag">Describe a business. It gets built from the logistics template.</p>
+        <p class="simple-tag">Describe a business. Watch it come to life.</p>
       </div>
 
       <form class="ask" id="ask" autocomplete="off">
@@ -73,7 +82,7 @@
       </form>
 
       <div class="ask-examples" id="ask-examples"></div>
-      <div class="ask-foot" id="ask-foot">One call to a free model. Everything after that is generated without one.</div>
+      <div class="ask-foot" id="ask-foot">The fastest, cheapest way from an idea to a working business.</div>
 
       <section class="simple-run" id="simple-run" hidden></section>
     </div>
@@ -122,7 +131,7 @@
         <div class="composer-foot">
           <label class="check"><input type="checkbox" id="force" /> Don't stop for questions — carry them as assumptions</label>
           <div class="grow"></div>
-          <span class="muted small" id="composer-hint">One call to a free model. Everything else is generated without one.</span>
+          <span class="muted small" id="composer-hint">One quick draft, then everything else is generated instantly.</span>
           <button class="btn primary" id="go" type="button">Draft blueprint</button>
         </div>
       </section>

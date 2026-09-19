@@ -128,6 +128,10 @@ console.log("\n2. Mechanical slips are fixed in code, not sent back to the model
   const smuggled = normalise(spec((s) => { s.agents[0].greeting = "Thank you for calling Smile Dental Clinic."; }), template, REQUEST);
   ok("a brand smuggled into a greeting is replaced, even when it contains the real name",
     smuggled.spec.agents[0].greeting === "Dental clinic, this is Meera. How can I help you today?", smuggled.spec.agents[0].greeting);
+  const kept = normalise(spec((s) => { s.agents[0].to = "Priya"; s.agents[0].greeting = "Dental clinic, this is Priya."; }), template, REQUEST);
+  ok("an agent that keeps the template's name gets one of its own", kept.spec.agents[0].to !== "Priya" && /^[A-Z][a-z]+$/.test(kept.spec.agents[0].to), kept.spec.agents[0].to);
+  ok("and its greeting says the new name", kept.spec.agents[0].greeting === `Dental clinic, this is ${kept.spec.agents[0].to}. How can I help you today?`, kept.spec.agents[0].greeting);
+  ok("the same draft always gets the same name", normalise(spec((s) => { s.agents[0].to = "Priya"; }), template, REQUEST).spec.agents[0].to === kept.spec.agents[0].to);
   ok("a threshold figure not in the request becomes an open question",
     n.spec.openQuestions.some((q) => q.question.includes("₹50,000")));
   ok("a threshold figure the requester gave is not questioned",

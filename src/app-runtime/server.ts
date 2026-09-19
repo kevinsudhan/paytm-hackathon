@@ -9,8 +9,10 @@
  * frontend is the logistics CRM's own layout and components (apps/crm-shell), driven by
  * the build's app.json; the backend is the template's kernel running the build's config.
  *
- * Loopback only, for the same reason as the builder's server: this is a local run of a
- * business that has not been deployed, and its data is on this disk.
+ * Loopback only by default, for the same reason as the builder's server: this is a local
+ * run of a business that has not been deployed, and its data is on this disk. Launched from
+ * a builder in LAN mode (or run with --lan) it is open to this network for devices that
+ * have the builder's access key; see src/builder/access.ts.
  */
 import express, { type Request, type Response, type NextFunction } from "express";
 import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
@@ -21,12 +23,18 @@ import { validateVertical } from "../verticals/validate.js";
 import { Store, StoreError } from "./store.js";
 import { Engine, EngineError } from "./engine.js";
 import { seedSample } from "./seed.js";
+import { accessFrom, guard, lanLinks } from "../builder/access.js";
+import { loadEnv } from "../builder/env.js";
+import { Live, ingestCall, readCall, sweep } from "./live.js";
+import { timingSafeEqual } from "node:crypto";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
+// The service keys, for an app started on its own rather than by the builder.
+loadEnv(root);
 
 // ------------------------------------------------------------------------- the build
 
-const [arg, portArg] = process.argv.slice(2);
+const [arg, portArg] = process.argv.slice(2).filter((a) => !a.startsWith("--"));
 if (!arg) {
   console.error("usage: npm run app -- <build name or path> [port]");
   process.exit(1);
@@ -47,8 +55,10 @@ if (problems.length) {
 
 const store = new Store(join(buildDir, "data"));
 const engine = new Engine(app, store);
+const live = new Live(buildDir, buildName, app, engine);
 const PORT = Number(portArg ?? process.env.APP_PORT ?? 8801);
-const HOST = "127.0.0.1";
+const access = accessFrom(process.env, process.argv, join(root, "builds", ".lan-key"));
+const HOST = access.listenHost;
 const STARTED_AT = new Date().toISOString();
 
 const readBuildFile = (rel: string) => {
@@ -60,11 +70,10 @@ const readBuildFile = (rel: string) => {
 
 const server = express();
 server.disable("x-powered-by");
+server.use(guard(access, app.business.name));
 server.use(express.json({ limit: "512kb" }));
 
 server.use((req: Request, res: Response, next: NextFunction) => {
-  const host = (req.headers.host ?? "").replace(/:\d+$/, "");
-  if (host !== "localhost" && host !== "127.0.0.1") return res.status(421).json({ error: "this app only answers on localhost" });
   if ((req.method === "POST" || req.method === "PATCH") && !req.is("application/json")) {
     return res.status(415).json({ error: "request bodies must be application/json" });
   }
@@ -97,13 +106,19 @@ const actor = (req: Request) => {
 
 server.get("/api/health", wrap(() => ({ ok: true, build: buildName, business: app.business.name, startedAt: STARTED_AT })));
 
+/** Deploying can give the build's agents new names (src/builder/agentNames.ts); show who they are now. */
+const currentAgents = () => {
+  try { app.agents = (JSON.parse(readFileSync(manifestPath, "utf-8")) as AppManifest).agents; } catch { /* keep what was loaded */ }
+  return app.agents;
+};
+
 server.get("/api/app", wrap(() => ({
   build: buildName,
   buildDir: `builds/${buildName}`,
   startedAt: STARTED_AT,
   port: PORT,
   manifest: app,
-  agents: app.agents.map((a) => {
+  agents: currentAgents().map((a) => {
     let cfg: Record<string, unknown> = {};
     try { cfg = JSON.parse(readBuildFile(a.promptFile.replace(/\.prompt\.md$/, ".agent.json"))); } catch { /* optional */ }
     return { ...a, prompt: readBuildFile(a.promptFile), config: cfg };
@@ -214,6 +229,42 @@ server.get("/api/ledger", wrap((req) => {
 
 server.post("/api/sample", wrap((req) => seedSample(app, engine, actor(req))));
 
+// ------------------------------------------------------------- the deployed services
+
+/** Where this build lives on n8n, SnapServe and Cognee, if it has been deployed. */
+server.get("/api/deployment", wrap(() => live.status()));
+
+server.post("/api/memory/ask", (req: Request, res: Response) => {
+  const q = String(req.body?.question ?? "").trim();
+  if (q.length < 3) return void res.status(400).json({ error: "ask a question" });
+  live.ask(q).then((r) => res.json(r), (e) => res.status(500).json({ error: String(e) }));
+});
+
+server.post("/api/knowledge/sync", (req: Request, res: Response) => {
+  try { actor(req); } catch (e) { return void res.status(400).json({ error: (e as Error).message }); }
+  live.syncKnowledge().then((r) => res.json(r), (e) => res.status(500).json({ error: String(e) }));
+});
+
+/**
+ * The routes the build's n8n workflows call. They carry the build's key (x-app-key), which
+ * only deploy.ts ever gives out — into this build's own n8n credential.
+ */
+const machine = (req: Request, res: Response, next: NextFunction) => {
+  const file = join(buildDir, ".app-secret");
+  const secret = existsSync(file) ? readFileSync(file, "utf-8").trim() : "";
+  const given = Buffer.from(String(req.header("x-app-key") ?? ""));
+  if (!secret || given.length !== secret.length || !timingSafeEqual(given, Buffer.from(secret))) {
+    return void res.status(401).json({ error: secret ? "wrong or missing x-app-key" : "this app has not been deployed, so it has no key" });
+  }
+  next();
+};
+
+server.post("/calls/ingest", machine, wrap((req) => ingestCall(app, engine, readCall(req.body ?? {}))));
+server.post("/sentinel/sweep", machine, wrap(() => sweep(engine)));
+server.post("/memory/cognify", machine, (_req: Request, res: Response) => {
+  live.cognify().then((r) => res.json(r), (e) => res.status(500).json({ error: String(e) }));
+});
+
 // --------------------------------------------------------------------- the frontend
 
 const ui = join(root, "apps", "crm-shell", "dist");
@@ -233,6 +284,8 @@ server.listen(PORT, HOST, (err?: Error) => {
     console.error(`\nCould not listen on ${HOST}:${PORT} — ${err.message}\n`);
     process.exit(1);
   }
-  writeFileSync(runtimeFile, JSON.stringify({ port: PORT, pid: process.pid, startedAt: STARTED_AT, url: `http://${HOST}:${PORT}/` }, null, 2));
-  console.log(`\n${app.business.name} (${buildName}) on http://${HOST}:${PORT}/\n`);
+  writeFileSync(runtimeFile, JSON.stringify({ port: PORT, pid: process.pid, startedAt: STARTED_AT, url: `http://127.0.0.1:${PORT}/`, lan: access.lan }, null, 2));
+  console.log(`\n${app.business.name} (${buildName}) on http://127.0.0.1:${PORT}/`);
+  if (access.lan) console.log(`On this network, for devices with the access key:\n${lanLinks(access, PORT).map((l) => `  ${l}`).join("\n")}`);
+  console.log("");
 });

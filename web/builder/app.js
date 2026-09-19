@@ -281,7 +281,21 @@ function setView(view, remember = true) {
   $$(".view-switch button").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.view === view)));
   document.body.classList.toggle("is-simple", view === "simple");
   document.body.classList.toggle("is-detailed", view === "detailed");
+  syncBackdrop();
   render();
+}
+
+/**
+ * The simple view's video plays only while that view is on screen, so the
+ * detailed view never pays for decoding it. For prefers-reduced-motion it never
+ * plays; the first frame stays as a still background.
+ */
+function syncBackdrop() {
+  const v = $("#backdrop-video");
+  if (!v) return;
+  const still = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (S.view === "simple" && !still) v.play().catch(() => { /* autoplay refused: the still frame stays */ });
+  else v.pause();
 }
 
 /** Paints the active view. The only render entry point anything else should call. */
@@ -334,6 +348,7 @@ function renderSimple() {
 
   // The composer stays put until there is something to show under it.
   const showAsk = !run;
+  $("#simple").classList.toggle("idle", showAsk);
   head.hidden = !showAsk;
   ex.hidden = !showAsk;
   foot.hidden = !showAsk;
@@ -477,7 +492,7 @@ function stepper(run) {
   const subs = [
     run.template ? `${Object.values(run.template.observed).filter(Boolean).length}/4 sources live` : "",
     run.state === "DRAFTING"
-      ? `${liveModel || "free model"} · ${drafting ? since(drafting.at) : ""}`
+      ? `${liveModel || "drafting"} · ${drafting ? since(drafting.at) : ""}`
       : d ? (d.cached ? "cache · 0 tokens" : `${fmt(d.usage.input + d.usage.output)} tokens`) : "",
     bp ? `${bp.tally.CLONE} cloned · ${bp.tally.REUSE} reused` : run.state === "CLARIFICATION_REQUIRED" ? "questions first" : "",
     run.approval ? `by ${run.approval.by}` : run.state === "WAITING_FOR_APPROVAL" ? "your decision" : "",
@@ -503,7 +518,7 @@ function renderRun() {
 
   if (RUNNING.has(run.state)) {
     const what = run.state === "DRAFTING"
-      ? "Drafting the delta against the template with a free model. This usually takes one to two minutes."
+      ? "Drafting the new business from the template. This usually takes a minute or two."
       : "Reading the logistics system — schema, workflows, agents and memory.";
     parts.push(`<div class="callout info"><div style="display:flex;gap:10px;align-items:center"><span class="spinner"></span><span>${esc(what)}</span></div></div>`);
   }
@@ -673,7 +688,7 @@ function agentsPanel(run) {
   const bp = run.blueprint;
   const prompts = bp.files.filter((f) => f.path.endsWith(".prompt.md"));
   return `${group("Voice agents", bp.items.filter((i) => i.area === "agent"))}
-    <div class="callout warn small">Agents are not created automatically — a new agent answers real callers. Create each one by hand on a sandbox number first.</div>
+    <div class="callout info small">Once built, deploying creates each agent on SnapServe as a draft, named for the build, with no phone number — a new agent never answers a real caller until someone gives it one.</div>
     ${prompts.map((f) => `<div class="group"><h3>${esc(f.path)}</h3>${codeBlock(f.content, "md")}</div>`).join("")}`;
 }
 
@@ -801,10 +816,19 @@ async function loadApps() {
  * Launch / open for one build's app. The app is its own process on its own port — the
  * builder starts it and links to it, and never shows it inside this page.
  */
+/**
+ * An app's address as this browser reaches it: the host this page came from, on the
+ * app's port. On the laptop that is 127.0.0.1; on a tablet it is the laptop's address.
+ */
+function appUrl(port) {
+  return `${location.protocol}//${location.hostname}:${port}/`;
+}
+
 function appControl(name) {
   const a = S.apps[name] || {};
-  if (a.running) {
-    return `<span class="app-ctl"><a class="btn primary small" href="${esc(a.url)}" target="_blank" rel="noopener">Open app ↗</a><span class="mono small muted">${esc(a.url)}</span></span>`;
+  if (a.running && a.port) {
+    const url = appUrl(a.port);
+    return `<span class="app-ctl"><a class="btn primary small" href="${esc(url)}" target="_blank" rel="noopener">Open app ↗</a><span class="mono small muted">${esc(url)}</span></span>`;
   }
   if (a.hasApp === false) {
     return `<span class="muted small">Built before apps existed — rebuild to get a runnable app.</span>`;
@@ -815,13 +839,19 @@ function appControl(name) {
 function bindAppControls(rerender) {
   $$("[data-launch]").forEach((b) => b.addEventListener("click", async () => {
     const name = b.dataset.launch;
+    // Opened now, inside the tap, and pointed at the app once it is up. Safari (and so
+    // every browser on an iPad) blocks a tab opened after an await as a popup.
+    const tab = window.open("", "_blank");
+    if (tab) tab.opener = null;
     b.disabled = true;
     b.innerHTML = '<span class="spinner"></span> Starting…';
     try {
       const st = await post(`/api/builds/${encodeURIComponent(name)}/launch`, {});
       S.apps[name] = { ...(S.apps[name] || {}), ...st, hasApp: true };
-      if (st.url) window.open(st.url, "_blank", "noopener");
+      if (st.port && tab) tab.location.href = appUrl(st.port);
+      else if (tab) tab.close();
     } catch (e) {
+      if (tab) tab.close();
       toast(e.message);
     }
     rerender();
@@ -922,7 +952,7 @@ function renderBuild() {
   let panel = "";
   if (S.buildTab === "lifecycle") panel = lifecyclePanel({ vertical: v });
   else if (S.buildTab === "agents") {
-    panel = `<div class="callout warn small">These agents exist as prompts and config only. Create each one by hand on a sandbox number before it answers a real caller.</div>` + prompts.map(agentBlock).join("");
+    panel = `<div class="callout info small">Deploying creates each agent on SnapServe as a draft, named for this build, with no phone number — see the Deploy tab.</div>` + prompts.map(agentBlock).join("");
   } else if (S.buildTab === "data") {
     panel = `<div class="group"><h3>Tables</h3><div class="flow">${tables.map((t) => `<span class="st">${esc(t)}</span>`).join("")}</div></div>
       <div class="group"><h3>schema.sql</h3>${codeBlock(sql, "sql")}</div>`;
@@ -932,7 +962,7 @@ function renderBuild() {
   } else if (S.buildTab === "files") {
     panel = filesView(files, b.buildDir);
   } else {
-    panel = codeBlock(buildFile("BUILD.md"), "md");
+    panel = deployPanel(b.name);
   }
 
   el.innerHTML = `<section class="card hero">
@@ -953,17 +983,134 @@ function renderBuild() {
       <div class="stat"><div class="v">${flows.length}</div><div class="l">Workflows</div></div>
       <div class="stat wide"><div class="model">${esc(memory.dataset || "—")}</div><div class="l">Memory dataset (Cognee)</div></div>
     </div>
-    <div class="callout info small">The business as built: config, schema, agent prompts and workflows on disk. Nothing has been deployed — the Deploy tab lists the steps, and each one reaches a live system.</div>
+    ${deployedLine(b.name)}
     <div class="tabs" role="tablist">${tabs.map(([id, label, n]) => `<button role="tab" data-btab="${id}" aria-selected="${S.buildTab === id}">${label}<span class="count">${n}</span></button>`).join("")}</div>
     <div class="tab-panel">${panel}</div>
   </section>`;
 
   $$("#run [data-btab]").forEach((x) => x.addEventListener("click", () => { S.buildTab = x.dataset.btab; renderBuild(); }));
   bindAppControls(renderBuild);
+  bindDeploy(b.name);
   $$("#run [data-file]").forEach((x) => x.addEventListener("click", () => { S.file = x.dataset.file; renderBuild(); }));
   const copy = $("#copy-file");
   if (copy) copy.addEventListener("click", async () => {
     try { await navigator.clipboard.writeText(buildFile(S.file)); copy.textContent = "Copied"; } catch { copy.textContent = "Copy failed"; }
+  });
+}
+
+// ------------------------------------------------------------------------- deploy
+/*
+ * The Deploy tab. A preview first — it only reads the live accounts — then Deploy, with a
+ * name, which creates everything under this build's own name. Every later deploy of the
+ * same build updates those same things in place; Remove deletes exactly them.
+ */
+S.deploy = {};
+
+async function loadDeployment(name, rerender = true) {
+  try {
+    S.deploy[name] = { ...(S.deploy[name] || {}), info: await api(`/api/builds/${encodeURIComponent(name)}/deployment`) };
+  } catch (e) {
+    S.deploy[name] = { ...(S.deploy[name] || {}), info: { error: e.message } };
+  }
+  if (rerender && S.build && S.build.name === name) renderBuild();
+}
+
+function deployedLine(name) {
+  const d = S.deploy[name];
+  if (!d || !d.info) { loadDeployment(name); return `<div class="callout info small">Checking where this business is deployed…</div>`; }
+  const r = d.info.record;
+  if (!r) return `<div class="callout info small">Built, not deployed. The Deploy tab creates its memory on Cognee, its agents on SnapServe and its workflows on n8n — all named for this build.</div>`;
+  return `<div class="callout ok small">Deployed ${esc(new Date(r.deployedAt).toLocaleString())} by ${esc(r.by)}: ${r.snapserve ? `${r.snapserve.agents.length} agent(s) on SnapServe` : "no agents"}, ${r.n8n ? `${r.n8n.workflows.length} workflow(s) on n8n` : "no workflows"}, ${r.cognee ? `memory in Cognee (${esc(r.cognee.dataset)})` : "no memory"}.</div>`;
+}
+
+const STEP_BADGE = { create: "ok", update: "info", replace: "info", keep: "", delete: "bad", skip: "warn" };
+
+function stepsTable(steps) {
+  return `<div class="items">${steps.map((s) => `<div class="item">
+    <span class="badge ${s.error ? "bad" : STEP_BADGE[s.action] || ""}">${esc(s.error ? "failed" : s.action)}</span>
+    <div><div class="map"><span class="muted small mono">${esc(s.service)}</span> <b>${esc(s.what)}</b></div>
+    ${s.note ? `<div class="why">${esc(s.note)}</div>` : ""}${s.error ? `<div class="why" style="color:var(--bad)">${esc(s.error)}</div>` : ""}</div>
+  </div>`).join("")}</div>`;
+}
+
+function deployPanel(name) {
+  const d = S.deploy[name] || {};
+  const info = d.info;
+  if (!info) { loadDeployment(name); return `<div class="muted small">Reading the deployment…</div>`; }
+  if (info.error) return `<div class="callout bad small">${esc(info.error)}</div>`;
+  const c = info.configured;
+  const missing = Object.entries(c).filter(([, v]) => !v).map(([k]) => k);
+  const r = info.record;
+  const parts = [];
+
+  parts.push(`<div class="callout info small">Everything is created under <b class="mono">[${esc(name)}]</b> and only ever changed or removed by this build — the logistics system's workflows, Priya and Arun, and earlier builds are never touched. Agents are drafts with no phone number; workflows are switched off.</div>`);
+  if (missing.length) parts.push(`<div class="callout warn small">Not configured in .env: ${esc(missing.join(", "))} — those steps are skipped.</div>`);
+
+  if (r) {
+    const wf = (r.n8n && r.n8n.workflows) || [];
+    parts.push(`<div class="group"><h3>Live now</h3><div class="items">
+      ${r.cognee ? `<div class="item"><span class="badge ok">cognee</span><div><div class="map"><b>${esc(r.cognee.dataset)}</b></div><div class="why">${r.cognee.documents} documents · graph ${esc(r.cognee.cognify)} · the app adds every recorded change</div></div></div>` : ""}
+      ${r.snapserve ? r.snapserve.agents.map((a) => `<div class="item"><span class="badge ok">agent</span><div><div class="map"><b>${esc(a.name)}</b> <span class="muted small mono">#${a.id}</span></div><div class="why">SnapServe · draft until someone gives it a number</div></div></div>`).join("") : ""}
+      ${r.snapserve ? r.snapserve.sources.map((s) => `<div class="item"><span class="badge ok">knowledge</span><div><div class="map"><b>${esc(s.name)}</b> <span class="muted small mono">#${s.id}</span></div></div></div>`).join("") : ""}
+      ${wf.map((w) => `<div class="item"><span class="badge ok">n8n</span><div><div class="map">${info.n8nBase ? `<a href="${esc(info.n8nBase)}/workflow/${esc(w.id)}" target="_blank" rel="noopener">${esc(w.name)}</a>` : `<b>${esc(w.name)}</b>`}</div><div class="why">${esc(w.webhooks.map((h) => h.replace(/^https?:\/\/[^/]+/, "")).join(", ") || "scheduled")}${w.calls.length ? ` · calls ${esc(w.calls.join(", "))}` : ""}</div></div></div>`).join("")}
+    </div><div class="muted small">Deployed ${esc(new Date(r.deployedAt).toLocaleString())} by ${esc(r.by)}${r.appUrl ? ` · app at ${esc(r.appUrl)}` : " · no public app URL yet, so the workflows call nothing"}</div></div>`);
+  }
+
+  parts.push(`<div class="group"><h3>${r ? "Deploy again" : "Deploy"}</h3>
+    <div class="act" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+      <input type="text" id="d-url" placeholder="Public app URL (optional, https://…)" value="${esc((r && r.appUrl) || "")}" style="flex:1;min-width:220px" class="input" />
+      <button class="btn ghost" id="d-preview" ${d.busy ? "disabled" : ""}>Preview</button>
+    </div></div>`);
+
+  if (d.busy) parts.push(`<div class="callout info small"><span class="spinner"></span> ${esc(d.busy)}</div>`);
+  if (d.error) parts.push(`<div class="callout bad small">${esc(d.error)}</div>`);
+  if (d.steps) {
+    parts.push(`<div class="group"><h3>${esc(d.stepsTitle)}</h3>${stepsTable(d.steps)}</div>`);
+    if (d.pending) {
+      parts.push(`<div class="act" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+        <input type="text" id="d-by" placeholder="Your name" class="input" style="min-width:160px" />
+        <button class="btn ${d.pending === "undeploy" ? "danger" : "primary"}" id="d-go">${d.pending === "undeploy" ? "Remove it" : "Deploy"}</button>
+        <span class="muted small">${d.pending === "undeploy" ? "Deletes exactly the items above." : "Reaches the live accounts."}</span>
+      </div>`);
+    }
+  }
+  if (r && !d.pending) parts.push(`<div class="restart" style="justify-content:flex-start"><button class="btn ghost small" id="d-remove" ${d.busy ? "disabled" : ""}>Remove this deployment…</button></div>`);
+  parts.push(`<details class="group"><summary class="muted small">BUILD.md</summary>${codeBlock(buildFile("BUILD.md"), "md")}</details>`);
+  return parts.join("");
+}
+
+function bindDeploy(name) {
+  const d = () => (S.deploy[name] = S.deploy[name] || {});
+  const go = async (label, fn) => {
+    d().busy = label; d().error = null; renderBuild();
+    try { await fn(); } catch (e) { d().error = e.message; }
+    d().busy = null;
+    await loadDeployment(name, false);
+    renderBuild();
+  };
+  const url = () => ($("#d-url") ? $("#d-url").value.trim() : "");
+
+  const preview = $("#d-preview");
+  if (preview) preview.addEventListener("click", () => go("Reading n8n, SnapServe and Cognee…", async () => {
+    const out = await post(`/api/builds/${encodeURIComponent(name)}/deploy`, { apply: false, appUrl: url() || undefined });
+    Object.assign(d(), { steps: out.steps, stepsTitle: "What deploying will do", pending: "deploy", appUrl: url() });
+  }));
+  const remove = $("#d-remove");
+  if (remove) remove.addEventListener("click", () => go("Checking what this build made…", async () => {
+    const out = await post(`/api/builds/${encodeURIComponent(name)}/undeploy`, { apply: false });
+    Object.assign(d(), { steps: out.steps, stepsTitle: "What removing will delete", pending: "undeploy" });
+  }));
+  const confirm = $("#d-go");
+  if (confirm) confirm.addEventListener("click", () => {
+    const by = ($("#d-by").value || "").trim();
+    if (!by) return toast("Add your name — the deployment is recorded with it.");
+    const pending = d().pending;
+    go(pending === "undeploy" ? "Removing…" : "Deploying — creating the dataset, agents and workflows…", async () => {
+      const out = pending === "undeploy"
+        ? await post(`/api/builds/${encodeURIComponent(name)}/undeploy`, { apply: true, by })
+        : await post(`/api/builds/${encodeURIComponent(name)}/deploy`, { apply: true, by, appUrl: d().appUrl || undefined });
+      Object.assign(d(), { steps: out.steps, stepsTitle: pending === "undeploy" ? "Removed" : "Deployed", pending: null });
+    });
   });
 }
 
@@ -996,7 +1143,7 @@ function renderExtend() {
   const el = $("#run");
   el.hidden = false;
   if (S.extendBusy) {
-    el.innerHTML = `<div class="callout info"><div style="display:flex;gap:10px;align-items:center"><span class="spinner"></span><span>Reading the request with a free model, then diffing it against the live system…</span></div></div>`;
+    el.innerHTML = `<div class="callout info"><div style="display:flex;gap:10px;align-items:center"><span class="spinner"></span><span>Reading the request, then comparing it with the live system…</span></div></div>`;
     return;
   }
   const run = S.extendRun;
@@ -1056,8 +1203,8 @@ function setMode(mode, render = true) {
   $("#request").placeholder = mode === "fork" ? EXAMPLES.fork[0][1] : EXAMPLES.extend[0][1];
   $("#go").textContent = mode === "fork" ? "Draft blueprint" : "Plan the change";
   $("#composer-hint").textContent = mode === "fork"
-    ? "One call to a free model. Everything else is generated without one."
-    : "One call to a free model to read the request; the diff against the live system is computed.";
+    ? "One quick draft, then everything else is generated instantly."
+    : "One quick read of the request, then the change is worked out against the live system.";
   $("#examples").innerHTML = EXAMPLES[mode].map(([label], i) => `<button type="button" class="chip" data-ex="${i}">${esc(label)}</button>`).join("");
   $$("#examples [data-ex]").forEach((b) => b.addEventListener("click", () => { $("#request").value = EXAMPLES[S.mode][Number(b.dataset.ex)][1]; $("#request").focus(); }));
   if (!render) return;

@@ -26,6 +26,9 @@ node scripts/n8n-deploy.mjs [--apply]            # dry run by default
 node scripts/wire-agent-webhook.mjs <url> [--apply]
 
 npm run builder:web       # builder UI on http://127.0.0.1:8790 (loopback only)
+npm run builder:lan       # same, also on this network for devices with the access key (builds/.lan-key)
+npm run deploy -- <build>                      # plan a build's deployment to Cognee, SnapServe, n8n (GETs only)
+npm run deploy -- <build> --apply --by=<name>  # do it; --undeploy [--apply] removes exactly what it made
 npm run fork -- [--force] [--build] "a dental clinic that books by phone"   # new business from the template
 npm run builder -- "change request"     # extend mode: plan a change to this system
 npm run manifest          # what the builder sees in the live system
@@ -55,7 +58,7 @@ Two modes, one model call each, both on free models:
 - **Fork** (`fork.ts` → `blueprint.ts` → `forkRun.ts`): a new business built from this logistics system as a template. The model is given a compact digest of the live template and returns only a delta (states, actions, column renames/drops/adds, which agents and workflows to keep). `normalise()` fixes mechanical slips in code; `checkFork()` rejects the rest (one repair call max). Everything after that — SQL, cloned n8n JSON, agent prompts, `vertical.ts` — is generated deterministically. Approval writes files to `builds/<id>-<hash>/` and nothing else. Drafts are cached in `builds/.cache/`; bump `PROMPT_VERSION` when the prompt changes.
 - **Extend** (`spec.ts` → `manifest.ts` → `gap.ts` → `plan.ts`, driven by `orchestrator.ts`): a change to this system, diffed against the live manifest. Stops at approval; no executor.
 
-`router.ts` sends every model call to Kilo Code's gateway (`KILO_API_KEY`), walking a ladder of free models with reasoning disabled; `BUILDER_GATEWAY=omniroute` switches to a local OmniRoute. The paid Anthropic path runs only with `BUILDER_ALLOW_PAID_FALLBACK=1`. `web.ts` serves `web/builder/` (plain HTML/JS, no build step) on 127.0.0.1 only, rejects non-localhost Host headers and non-JSON POSTs — keep it off public interfaces, it holds the service-role key.
+`router.ts` sends every model call to Kilo Code's gateway (`KILO_API_KEY`), walking a ladder of free models with reasoning disabled; `BUILDER_GATEWAY=omniroute` switches to a local OmniRoute. The paid Anthropic path runs only with `BUILDER_ALLOW_PAID_FALLBACK=1`. `web.ts` serves `web/builder/` (plain HTML/JS, no build step) on 127.0.0.1 only, rejects non-localhost Host headers and non-JSON POSTs — keep it off public interfaces, it holds the service-role key. The one exception is `--lan` (`access.ts`, shared with the app runtime): it binds all interfaces, still rejects Hosts that are not this machine, and requires the access key (query once, then an HttpOnly cookie) from every non-loopback caller. Apps launched from a LAN-mode builder inherit the mode and key.
 
 ## Built apps (`src/app-runtime/`, `apps/crm-shell/`)
 
@@ -63,6 +66,15 @@ Every fork build writes `app.json` (from `src/builder/appManifest.ts`): each tab
 
 - Backend: `engine.ts` runs the kernel via `domain/machine.ts` + `decideFor()` on the build's vertical — the same state machine and policy gate as freight (twin.ts/policy.ts delegate to the same code). Held actions go to an approvals queue; the requester cannot approve their own; approval re-checks legality. Every write needs a desk-user name (`x-desk-user`) and lands in the append-only ledger.
 - Frontend: `apps/crm-shell` is the logistics CRM's React/Vite/Tailwind shell (layout, theme, MetricCard, StatusPill, RowCard, PageHeader, Brand, the StageAction/Timeline patterns — copied from the `crm-v1` branch and adapted), with every page driven by `/api/app`. It has its own `package.json`; rebuild with `npm run app:ui` after editing it.
+
+## Deploying a build (`src/builder/deploy.ts`, `deployContent.ts`, `agentNames.ts`)
+
+`deploy.ts` pushes a build to the live, **shared** accounts through their APIs: a Cognee dataset of its own (seeded with prose about the business, then cognified), SnapServe knowledge sources (created with content inline — an empty source stays "failed") and draft agents cloned from the template's voice setup, and an n8n credential (`x-app-key`) plus the workflows, switched off. The record is `builds/<name>/deploy.json`.
+
+- Isolation is the rule: everything is named `[<build name>]`, and an update or delete needs both the id in that build's record and the namespaced name read back live. Never write to Priya (717), Arun (758), the SHIPMATE workflows, `araxys_shipments`, or anything another build made. `deploy.test.ts` pins this with fakes of all three services.
+- Agents never reuse a name any other agent on the account has: `fork.ts` renames template names at draft time, and `deploy.ts` renames against the live account (rewriting app.json, prompt, greeting and agent files) before creating. Build agents get `voiceMemoryEnabled: false` — caller memory carries the logistics CRM's customer facts. SnapServe drops `dispositionSchema` on create, so it is PATCHed after.
+- Never activates workflows or gives agents a phone number or webhook. Going live needs the app at a public https URL (n8n Cloud can't reach a laptop; no tunnels).
+- The running app (`app-runtime/live.ts`) writes every ledger entry to its Cognee dataset, answers `/api/memory/ask`, rebuilds its "reference data" knowledge source when slots/partners change (sample rows excluded via the ledger), and exposes `/calls/ingest`, `/sentinel/sweep`, `/memory/cognify` to its n8n workflows behind `x-app-key` (`builds/<name>/.app-secret`).
 
 ## Model choices
 

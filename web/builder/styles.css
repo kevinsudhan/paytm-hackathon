@@ -28,7 +28,11 @@
    serialise: the browser must fetch and parse this file before it even
    discovers the font request. */
 
-:root {
+/* body.is-simple shares these values so the simple view keeps the dark
+   palette in light mode too: it sits on a dark video (see THE BACKDROP), and
+   the light-mode rule below only targets :root. */
+:root,
+body.is-simple {
   color-scheme: dark light;
 
   /* --- ink surfaces. Never pure black: it smears on OLED and reads cheap. */
@@ -289,14 +293,16 @@ a:hover { border-bottom-color: var(--ink-2); }
 .pop-title { font-weight: 600; font-size: 12.5px; }
 .pop-foot { margin-top: 11px; padding-top: 10px; border-top: 1px solid var(--line); color: var(--ink-3); line-height: 1.5; }
 
-.ladder { list-style: none; margin: 0; padding: 0; display: grid; gap: 1px; }
+/* minmax(0, 1fr): a grid track otherwise grows to its longest unbroken model
+   id and pushes the rows out of the popover, where the ellipsis never fires. */
+.ladder { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 1px; }
 .ladder li {
   display: flex; align-items: center; gap: 9px;
   padding: 6px 8px; border-radius: var(--r-sm);
   font-family: var(--mono); font-size: 11px;
   background: var(--surface-2);
 }
-.ladder li .grow { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ladder li .grow { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ladder li .n {
   display: grid; place-items: center; flex: none;
   width: 16px; height: 16px; border-radius: 4px;
@@ -305,6 +311,57 @@ a:hover { border-bottom-color: var(--ink-2); }
 }
 .ladder li.current { background: var(--surface-3); box-shadow: inset 2px 0 0 var(--ok); }
 .ladder li.current .n { background: var(--ok-bg); color: var(--ok); }
+
+/* ------------------------------------------------------- top bar, narrow
+   The full bar needs about 1010px, more while it says "drafting · 12s" or
+   "via Anthropic (paid)". Below that it gives things up in order: first the
+   subtitle and the small labels, then, under 760px, the single row. Nothing on
+   it ever wraps onto a second line inside itself; text is cut short with an
+   ellipsis. The pill keeps its "via" text at every width, because that is
+   where a paid fallback or a dead gateway shows. */
+.brand-name, .brand-sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.model-pill { min-width: 0; }
+.model-pill .tag, .model-pill .chev { flex: none; }
+.model-pill b,
+.model-pill .muted { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.view-switch, .tokens { flex: none; white-space: nowrap; }
+
+@media (max-width: 1080px) {
+  .brand-sub, .model-pill .k, .tokens .k { display: none; }
+}
+
+/* Two rows: the wordmark and the view switch, then the model pill across the
+   width with the token count beside it. */
+@media (max-width: 760px) {
+  :root { --topbar-h: 88px; }
+  .topbar {
+    flex-wrap: wrap; row-gap: 0; column-gap: 10px;
+    height: auto; padding: 8px 14px 9px;
+  }
+  /* A full-width item with no height. It ends the first row, so the pill and
+     the token count always start the second, whatever width is left over. */
+  .topbar::after { content: ""; order: 1; flex-basis: 100%; height: 0; }
+  .topbar .wordmark { --wm: 88px; }
+  .brand { gap: 9px; }
+  /* Its children join the bar's own rows. The popover inside is then placed
+     against the bar, which is sticky and so already positioned. */
+  .topbar-right { display: contents; }
+  .view-switch { margin-left: auto; }
+  .model-pill { order: 2; flex: 1 1 0; margin-top: 8px; }
+  .model-pill .chev { margin-left: auto; }
+  .tokens { order: 3; margin-top: 8px; }
+  .popover { top: calc(100% + 6px); right: 14px; width: min(344px, calc(100vw - 28px)); }
+}
+/* The session count is the one thing on the bar you can do without. */
+@media (max-width: 420px) {
+  .tokens { display: none; }
+}
+/* On the smallest phones the divider goes, so the wordmark, the name and the
+   view switch still share one row. */
+@media (max-width: 360px) {
+  .brand-div { display: none; }
+  .brand { gap: 8px; }
+}
 
 /* ------------------------------------------------------------------ layout */
 .layout {
@@ -729,7 +786,8 @@ a:hover { border-bottom-color: var(--ink-2); }
   background: var(--surface-2);
 }
 .approval .act { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.approval input[type="text"] {
+.approval input[type="text"],
+input.input {
   flex: 1; min-width: 160px;
   padding: 8px 11px; border-radius: var(--r);
   background: var(--surface); color: var(--ink);
@@ -737,7 +795,8 @@ a:hover { border-bottom-color: var(--ink-2); }
   font: 400 12.5px var(--sans);
   transition: border-color var(--t), box-shadow var(--t);
 }
-.approval input[type="text"]:focus {
+.approval input[type="text"]:focus,
+input.input:focus {
   outline: none; border-color: var(--line-3);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--ink-3) 12%, transparent);
 }
@@ -934,7 +993,7 @@ body.is-detailed .simple { display: none; }
 .simple {
   display: grid; place-items: start center;
   padding: 40px 20px 72px;
-  min-height: calc(100vh - 56px);
+  min-height: calc(100vh - var(--topbar-h, 56px));
 }
 .simple-inner { width: 100%; max-width: 640px; display: grid; gap: 16px; }
 
@@ -1053,6 +1112,94 @@ body.is-detailed .simple { display: none; }
   .simple-head { margin-top: 3vh; }
   .wordmark.lg { --wm: 160px; }
 }
+
+/* With nothing asked yet the composer is the whole page, so it sits in the
+   optical centre — a little above the true middle, where the eye lands first.
+   Once a run is showing, it goes back to the top and grows downwards. */
+.simple.idle { place-items: center; padding-bottom: calc(72px + 8vh); }
+.simple.idle .simple-head { margin-top: 0; }
+
+/* ===========================================================================
+   THE BACKDROP
+   ---------------------------------------------------------------------------
+   The simple view sits on a looping video (assets/midnight-bloom.webm) of
+   bright, saturated violet. Text is not legible on it as it is, so a scrim
+   darkens it by about a third, more at the edges and under the top bar, and
+   every surface on top of it is dark glass. The palette is always the dark
+   one here, even in light mode, because the video sets how bright the page is.
+   =========================================================================== */
+body.is-simple {
+  color-scheme: dark;
+  --bg:          #120C26;
+  --surface:     rgba(18, 12, 40, .52);
+  --surface-2:   rgba(24, 16, 52, .60);
+  --surface-3:   rgba(255, 255, 255, .12);
+  --line:        rgba(255, 255, 255, .14);
+  --line-2:      rgba(255, 255, 255, .22);
+  --line-3:      rgba(255, 255, 255, .38);
+  --ink:         #FFFFFF;
+  --ink-2:       rgba(255, 255, 255, .86);
+  --ink-3:       rgba(255, 255, 255, .74);
+  --action:      #FFFFFF;
+  --action-ink:  #1A1033;
+  --action-hover:#F1EAFF;
+  background: var(--bg);
+}
+
+.backdrop {
+  position: fixed; inset: 0; z-index: 0;
+  overflow: hidden; pointer-events: none;
+  /* What shows before the first frame decodes: the video's own two colours. */
+  background: radial-gradient(120% 100% at 30% 40%, #6A48B8, #2A1A5C 70%);
+}
+.backdrop video { display: block; width: 100%; height: 100%; object-fit: cover; }
+.backdrop::after {
+  content: ""; position: absolute; inset: 0;
+  background:
+    linear-gradient(to bottom, rgba(10, 6, 26, .62) 0, rgba(10, 6, 26, 0) 20%, rgba(10, 6, 26, 0) 72%, rgba(10, 6, 26, .55) 100%),
+    radial-gradient(130% 95% at 50% 46%, rgba(12, 8, 30, .30), rgba(12, 8, 30, .62));
+  transition: background-color 400ms var(--ease);
+}
+/* A run puts a lot of small text on screen, so the scrim deepens under it. */
+.simple:not(.idle) .backdrop::after { background-color: rgba(10, 6, 26, .30); }
+
+.simple-inner { position: relative; z-index: 1; }
+
+body.is-simple .topbar {
+  background: rgba(12, 8, 30, .28);
+  border-bottom-color: rgba(255, 255, 255, .08);
+}
+/* The popover opens over the hero, so glass would let the text behind show
+   through. It is close to solid instead. */
+body.is-simple .popover {
+  background: rgba(20, 13, 44, .95);
+  -webkit-backdrop-filter: blur(20px);
+          backdrop-filter: blur(20px);
+}
+
+/* The wordmark is a mask, so it cannot carry its own shadow; the shadow goes
+   on the head, where it lifts the mark and the tagline together. */
+.simple-head { filter: drop-shadow(0 2px 22px rgba(20, 8, 52, .55)); }
+.simple .simple-tag { color: rgba(255, 255, 255, .9); font-size: 15px; }
+.simple .ask-foot { color: rgba(255, 255, 255, .78); text-shadow: 0 1px 10px rgba(20, 8, 52, .7); }
+
+.simple .ask,
+.simple .outcome,
+.simple .said {
+  -webkit-backdrop-filter: blur(18px) saturate(1.4);
+          backdrop-filter: blur(18px) saturate(1.4);
+}
+.simple .ask { box-shadow: 0 12px 40px -12px rgba(10, 4, 30, .65); }
+.simple .ask textarea::placeholder { color: rgba(255, 255, 255, .66); }
+
+.simple .chip {
+  background: rgba(255, 255, 255, .10);
+  border-color: rgba(255, 255, 255, .20);
+  color: rgba(255, 255, 255, .92);
+  -webkit-backdrop-filter: blur(10px);
+          backdrop-filter: blur(10px);
+}
+.simple .chip:hover { background: rgba(255, 255, 255, .18); border-color: rgba(255, 255, 255, .34); color: #FFFFFF; }
 
 /* What the simple view deferred rather than hid. It is a button, not a note:
    the whole detail is one click away and that click is the point. */

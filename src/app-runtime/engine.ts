@@ -76,9 +76,13 @@ export class Engine {
     return this.store.read<LedgerEntry[]>("_ledger", []);
   }
 
+  /** Told about every entry after it is written — how a deployed app feeds its memory. */
+  onRecord?: (entry: LedgerEntry) => void;
+
   private record(e: Omit<LedgerEntry, "id" | "at">): LedgerEntry {
     const entry: LedgerEntry = { id: randomUUID().slice(0, 8), at: new Date().toISOString(), ...e };
     this.store.write("_ledger", [...this.ledger(), entry]);
+    try { this.onRecord?.(entry); } catch { /* a listener never undoes a write */ }
     return entry;
   }
 

@@ -34,6 +34,7 @@ import { join } from "node:path";
 import { z } from "zod";
 import type { Manifest } from "./manifest.js";
 import { ROUTES } from "./agentRouting.js";
+import { pickName } from "./agentNames.js";
 import { complete, type CompletionRequest, type CompletionResult, type TokenUsage } from "./router.js";
 import type { VerticalConfig } from "../verticals/types.js";
 import { validateVertical } from "../verticals/validate.js";
@@ -413,10 +414,17 @@ export function normalise(spec: ForkSpec, t: Template, request = ""): { spec: Fo
   // the wrong name; and drafts kept doing the same — "Smile Dental Clinic" in the greeting
   // of a business named "Dental clinic", which a substring check waves through. A greeting
   // is the one line every caller hears, and it can only say the one name.
+  //
+  // And an agent's name is its own (agentNames.ts): a draft that keeps "Priya", or names
+  // two agents alike, gets a fresh name here — the greeting below is then built with it.
+  const takenNames = new Set(t.agents.map((x) => x.name.toLowerCase()));
   for (const a of s.agents) {
-    if (t.agents.some((x) => x.name.toLowerCase() === a.to.toLowerCase())) {
-      notes.push(`agent "${a.to}" keeps its template name — callers of both businesses would hear the same person`);
+    if (takenNames.has(a.to.toLowerCase())) {
+      const fresh = pickName(a.from || a.to, takenNames, `${v.id}|${a.from}|${a.role}`);
+      notes.push(`agent "${a.to}" is renamed ${fresh} — ${t.agents.some((x) => x.name.toLowerCase() === a.to.toLowerCase()) ? "that name answers for the template" : "another agent here already has it"}, and every app's agents are its own`);
+      a.to = fresh;
     }
+    takenNames.add(a.to.toLowerCase());
     const built = `${v.business.name}, this is ${a.to}. How can I help you today?`;
     if (a.greeting && a.greeting !== built) notes.push(`${a.to}'s greeting is built from the business name, not the model's ("${a.greeting.slice(0, 60)}")`);
     a.greeting = built;
