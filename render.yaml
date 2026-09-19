@@ -42,6 +42,19 @@ services:
       - key: GEMINI_MODEL
         value: gemini-3.5-flash
 
+      # The v1 CRM. Without these the service boots and answers /health, and every route
+      # that needs an enquiry returns 500 — adapters/crmV1.ts throws rather than degrading,
+      # because a silently dropped commitment is worse than an error. They were missing
+      # from this file entirely, so a deploy from the blueprint came up unable to read the
+      # CRM and nothing said so until an RFQ was attempted.
+      #
+      # SUPABASE_SERVICE_ROLE_KEY bypasses row-level security on every table. It belongs in
+      # exactly one process.
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+
       # Cognee, if you deploy it. Left unset, memory degrades to empty and /health says so
       # rather than pretending it works.
       - key: COGNEE_BASE_URL
