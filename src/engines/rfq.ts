@@ -412,6 +412,9 @@ export async function priceFromQuotes(ref: string, opts: {
   })));
 
   await crm.setPipeline(ref, p.verdict === "auto" ? "pricing" : "awaiting_approval");
+  // The record is what every CRM screen reads. Leaving the total only in quote_lines
+  // meant a priced enquiry still looked unpriced everywhere a human actually looks.
+  await crm.setQuotedAmount(ref, p.sellInr);
   await crm.logEvent(
     ref, "quote.priced",
     `Priced at INR ${p.sellInr.toLocaleString("en-IN")} on ${best.partner_label}'s ${best.currency} ${best.amount} — ${p.why}`,

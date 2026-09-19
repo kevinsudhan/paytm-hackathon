@@ -81,6 +81,28 @@ export async function setPipeline(ref: string, pipeline: string): Promise<void> 
   });
 }
 
+/**
+ * Writes the quoted total back onto the enquiry.
+ *
+ * The SELL, never the cost. This column is read by the CRM's own screens and by anything
+ * that renders a figure to a customer, so a cost landing here would put the partner's buy
+ * rate in front of the person we bought it for. margin.ts refuses to render a document
+ * containing a cost figure for the same reason; this is the same rule one layer down.
+ *
+ * Without this the quoting pipeline finished correctly and left no trace on the record:
+ * partner_quotes and quote_lines held everything, real_records held nothing, and every
+ * screen that reads the record showed an enquiry that had never been priced.
+ */
+export async function setQuotedAmount(ref: string, sellInr: number): Promise<void> {
+  await rest(`real_records?ref=eq.${encodeURIComponent(ref)}`, {
+    method: "PATCH",
+    body: JSON.stringify({
+      quoted_amount_inr: Math.round(sellInr),
+      updated_at: new Date().toISOString(),
+    }),
+  });
+}
+
 // ---------------------------------------------------------------- partners
 
 export interface PartnerRow {
