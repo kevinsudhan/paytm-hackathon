@@ -13,7 +13,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AppManifest } from "./appManifest.js";
-import { deploy, readRecord, sourcesFor, undeploy, type Services } from "./deploy.js";
+import { deploy, readRecord, setActive, sourcesFor, undeploy, type Services } from "./deploy.js";
 import { dispositionSchema, NO_APP_URL, sampleRowIds } from "./deployContent.js";
 import { Store } from "../app-runtime/store.js";
 import { Engine } from "../app-runtime/engine.js";
@@ -62,6 +62,14 @@ const fakeFetch = (async (input: string | URL | Request, init?: RequestInit) => 
       if (method === "GET") return reply(200, w);
       if (method === "PUT") { n8n.workflows.set(m[1]!, { ...w, ...body }); return reply(200, n8n.workflows.get(m[1]!)); }
       if (method === "DELETE") { n8n.workflows.delete(m[1]!); return reply(200, w); }
+    }
+    // n8n activates through its own endpoints, not through a field on the workflow —
+    // which is why a PUT cannot switch one off.
+    if (method === "POST" && (m = p.match(/^\/api\/v1\/workflows\/([^/]+)\/(activate|deactivate)$/))) {
+      const w = n8n.workflows.get(m[1]!);
+      if (!w) return reply(404, { message: "not found" });
+      w.active = m[2] === "activate";
+      return reply(200, w);
     }
     if (method === "POST" && p === "/api/v1/credentials") { const id = `cred-${seq++}`; n8n.credentials.set(id, { id, ...body }); return reply(200, { id }); }
     if (method === "DELETE" && (m = p.match(/^\/api\/v1\/credentials\/(.+)$/))) { n8n.credentials.delete(m[1]!); return reply(200, {}); }
@@ -244,7 +252,49 @@ try {
   tampered.snapserve!.agents[0]!.id = rec.snapserve!.agents[0]!.id;
   writeFileSync(join(a, "deploy.json"), JSON.stringify(tampered));
 
-  console.log("\n6. Removing a deployment deletes exactly what it made");
+  console.log("\n6. Switching a workflow on is a separate decision, and a refusable one");
+  const wfId = readRecord(a)!.n8n!.workflows[0]!.id;
+  const fails = async (o: Parameters<typeof setActive>[2]) => await setActive(a, services, o).catch((e: unknown) => e);
+
+  let err = await fails({ id: wfId, active: true, by: "   ", fetch: fakeFetch });
+  ok("refuses without a name", err instanceof Error && /who is switching/.test(err.message), String(err));
+
+  err = await fails({ id: "wf-shipmate-01", active: true, by: "tester", fetch: fakeFetch });
+  ok("refuses an id this build never deployed", err instanceof Error && /no workflow wf-shipmate-01/.test(err.message), String(err));
+
+  mark = log.length;
+  err = await fails({ id: wfId, active: true, by: "tester", fetch: fakeFetch });
+  ok("refuses while the app has no public URL", err instanceof Error && /no public app URL/.test(err.message), String(err));
+  ok("and n8n was never asked", !writes(mark).some((r) => r.url.includes("/activate")));
+
+  // With a real URL the workflow's one call — /calls/ingest — is a route the app serves.
+  await deploy(a, services, { apply: true, by: "tester", appUrl: "https://dental.example.com", fetch: fakeFetch });
+  const liveId = readRecord(a)!.n8n!.workflows[0]!.id;
+
+  // The record is the only thing naming which workflow belongs to this build, so a bad
+  // record must not be enough: the live name is read back and checked before any switch.
+  const t2 = readRecord(a)!;
+  t2.n8n!.workflows[0]!.id = "wf-shipmate-01";
+  writeFileSync(join(a, "deploy.json"), JSON.stringify(t2));
+  mark = log.length;
+  err = await fails({ id: "wf-shipmate-01", active: false, by: "tester", fetch: fakeFetch });
+  ok("refuses a workflow outside the build's namespace", err instanceof Error && /refusing to change workflow "SHIPMATE 01/.test(err.message), String(err));
+  ok("and SHIPMATE 01 is still running", n8n.workflows.get("wf-shipmate-01")!.active === true && !writes(mark).some((r) => /wf-shipmate-01\/(de)?activate/.test(r.url)));
+  t2.n8n!.workflows[0]!.id = liveId;
+  writeFileSync(join(a, "deploy.json"), JSON.stringify(t2));
+
+  const on = await setActive(a, services, { id: liveId, active: true, by: "kevin", fetch: fakeFetch });
+  ok("switches its own workflow on", on.active === true && n8n.workflows.get(liveId)!.active === true);
+  ok("and records who did it", readRecord(a)!.n8n!.workflows[0]!.activatedBy === "kevin");
+
+  await deploy(a, services, { apply: true, by: "tester", appUrl: "https://dental.example.com", fetch: fakeFetch });
+  ok("deploying again does not switch it off", readRecord(a)!.n8n!.workflows[0]!.active === true && n8n.workflows.get(liveId)!.active === true);
+
+  const off = await setActive(a, services, { id: liveId, active: false, by: "kevin", fetch: fakeFetch });
+  ok("off again, and no one is recorded as having it on", off.active === false && !readRecord(a)!.n8n!.workflows[0]!.activatedBy);
+  ok("the logistics system was never written to throughout", touches(writes(0), ["wf-shipmate-01"]).length === 0);
+
+  console.log("\n7. Removing a deployment deletes exactly what it made");
   mark = log.length;
   const gone = await undeploy(a, services, { apply: true, fetch: fakeFetch });
   ok("no step failed", gone.every((s) => !s.error), gone.filter((s) => s.error));
@@ -255,7 +305,7 @@ try {
     snap.agents.has(recB.snapserve!.agents[0]!.id) && cog.datasets.has(recB.cognee!.datasetId));
   ok("and the record is set aside", !existsSync(join(a, "deploy.json")));
 
-  console.log("\n7. The agents never read sample data as real");
+  console.log("\n8. The agents never read sample data as real");
   {
     const dir = makeBuild(root, "dental-cccccc");
     const eng = new Engine(app, new Store(join(dir, "data")));
@@ -268,7 +318,7 @@ try {
     ok("real slots go in", ref.includes("Dr. Real"));
   }
 
-  console.log("\n8. A call comes back into the app as a record");
+  console.log("\n9. A call comes back into the app as a record");
   const store = new Store(join(b, "data"));
   const engine = new Engine(app, store);
   ok("the agent's fields are the app's columns", dispositionSchema(app).map((f) => f.key).join(",") === "patient_name,phone,fee_inr,is_new_patient,call_summary");

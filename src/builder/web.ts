@@ -28,7 +28,8 @@ import { readTemplate, type Template } from "./fork.js";
 import { startFork, clarifyFork, decideFork, buildFork, getForkRun, listForkRuns, ForkStateError, type ForkRun } from "./forkRun.js";
 import { analyseRequest, decide as decideExtend, getRun as getExtendRun, StateError } from "./orchestrator.js";
 import { accessEnv, accessFrom, guard, lanLinks } from "./access.js";
-import { deploy, readRecord, servicesFromEnv, undeploy } from "./deploy.js";
+import { deploy, readRecord, servicesFromEnv, setActive, undeploy } from "./deploy.js";
+import { APP_ROUTES } from "./deployContent.js";
 import { AppError, createApp } from "../app-runtime/app.js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -464,7 +465,27 @@ app.get("/api/builds/:name/deployment", wrap(async (req, res) => {
     busy: deploying.has(param(req, "name")),
     // A hosted builder serves the app publicly, which is the URL n8n needs to go live.
     publicAppUrl: PUBLIC && PUBLIC_URL ? `${PUBLIC_URL}/apps/${param(req, "name")}` : null,
+    // What the app actually answers. The panel greys out a workflow that calls anything
+    // else, so the reason it cannot be switched on is on screen before it is clicked.
+    appRoutes: APP_ROUTES,
   });
+}));
+
+/**
+ * Switch one deployed workflow on or off.
+ *
+ * Its own route rather than a flag on deploy: creating a workflow and starting it are
+ * different decisions, and this one is made per workflow. deploy.ts holds the refusals.
+ */
+app.post("/api/builds/:name/workflows/:id/active", wrap(async (req, res) => {
+  const dir = buildDirOf(req);
+  if (!dir) return res.status(404).json({ error: "no such build" });
+  const by = String(req.body?.by ?? "").trim().slice(0, 60);
+  try {
+    res.json(await setActive(dir, servicesFromEnv(), { id: param(req, "id"), active: req.body?.active === true, by }));
+  } catch (e) {
+    res.status(400).json({ error: e instanceof Error ? e.message : String(e) });
+  }
 }));
 
 app.post("/api/builds/:name/deploy", wrap(async (req, res) => {

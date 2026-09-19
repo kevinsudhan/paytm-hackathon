@@ -743,6 +743,10 @@ a:hover { border-bottom-color: var(--ink-2); }
   transition: background var(--t);
 }
 .item:hover { background: var(--surface-2); }
+/* A row that carries a control needs a third column; without it the button wraps
+   under the badge and reads as belonging to the row below. */
+.item.switchable { grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; }
+.item.switchable .badge { align-self: start; margin-top: 2px; }
 .item .name { font-family: var(--mono); font-size: 12px; font-weight: 500; word-break: break-word; }
 .item .why  { font-size: 11.5px; color: var(--ink-3); line-height: 1.5; margin-top: 2px; }
 .item .map  { font-family: var(--mono); font-size: 11px; color: var(--ink-3); margin-top: 2px; }

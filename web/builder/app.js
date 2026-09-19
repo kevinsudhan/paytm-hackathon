@@ -1057,6 +1057,40 @@ function stepsTable(steps) {
   </div>`).join("")}</div>`;
 }
 
+/**
+ * One deployed workflow, with the switch that starts it.
+ *
+ * A workflow that cannot safely go on says why here rather than failing on the click.
+ * deploy.ts refuses the same three cases server-side — this is the explanation, not the
+ * check, and the button stays disabled either way.
+ */
+function workflowItem(w, r, info) {
+  const on = w.active === true;
+  const routes = info.appRoutes || [];
+  const gap = (w.calls || []).filter((c) => !routes.includes(c));
+  const mailbox = /gmail|imap|mail/i.test(w.trigger || "");
+
+  let blocked = null;
+  if (!on && !r.appUrl) blocked = "No public app URL — it would call nothing.";
+  else if (!on && gap.length) blocked = `Calls routes this app does not serve (${gap.join(", ")}) — it would fail on every run.`;
+
+  const where = w.webhooks.map((h) => h.replace(/^https?:\/\/[^/]+/, "")).join(", ") || "scheduled";
+  const name = info.n8nBase
+    ? `<a href="${esc(info.n8nBase)}/workflow/${esc(w.id)}" target="_blank" rel="noopener">${esc(w.name)}</a>`
+    : `<b>${esc(w.name)}</b>`;
+
+  return `<div class="item switchable">
+    <span class="badge ${on ? "ok" : ""}">${on ? "on" : "off"}</span>
+    <div class="grow">
+      <div class="map">${name}</div>
+      <div class="why">${esc(where)}${w.calls.length ? ` · calls ${esc(w.calls.join(", "))}` : ""}${on && w.activatedBy ? ` · switched on by ${esc(w.activatedBy)}` : ""}</div>
+      ${blocked ? `<div class="why muted">${esc(blocked)}</div>` : ""}
+      ${!on && !blocked && mailbox ? `<div class="why muted">Reads a real mailbox the moment it is on.</div>` : ""}
+    </div>
+    <button class="btn small ${on ? "ghost" : "primary"}" data-wf="${esc(w.id)}" data-on="${on ? "1" : "0"}" ${blocked ? "disabled" : ""}>${on ? "Switch off" : "Switch on"}</button>
+  </div>`;
+}
+
 function deployPanel(name) {
   const d = S.deploy[name] || {};
   const info = d.info;
@@ -1076,8 +1110,13 @@ function deployPanel(name) {
       ${r.cognee ? `<div class="item"><span class="badge ok">cognee</span><div><div class="map"><b>${esc(r.cognee.dataset)}</b></div><div class="why">${r.cognee.documents} documents · graph ${esc(r.cognee.cognify)} · the app adds every recorded change</div></div></div>` : ""}
       ${r.snapserve ? r.snapserve.agents.map((a) => `<div class="item"><span class="badge ok">agent</span><div><div class="map"><b>${esc(a.name)}</b> <span class="muted small mono">#${a.id}</span></div><div class="why">SnapServe · draft until someone gives it a number</div></div></div>`).join("") : ""}
       ${r.snapserve ? r.snapserve.sources.map((s) => `<div class="item"><span class="badge ok">knowledge</span><div><div class="map"><b>${esc(s.name)}</b> <span class="muted small mono">#${s.id}</span></div></div></div>`).join("") : ""}
-      ${wf.map((w) => `<div class="item"><span class="badge ok">n8n</span><div><div class="map">${info.n8nBase ? `<a href="${esc(info.n8nBase)}/workflow/${esc(w.id)}" target="_blank" rel="noopener">${esc(w.name)}</a>` : `<b>${esc(w.name)}</b>`}</div><div class="why">${esc(w.webhooks.map((h) => h.replace(/^https?:\/\/[^/]+/, "")).join(", ") || "scheduled")}${w.calls.length ? ` · calls ${esc(w.calls.join(", "))}` : ""}</div></div></div>`).join("")}
-    </div><div class="muted small">Deployed ${esc(new Date(r.deployedAt).toLocaleString())} by ${esc(r.by)}${r.appUrl ? ` · app at ${esc(r.appUrl)}` : " · no public app URL yet, so the workflows call nothing"}</div></div>`);
+      ${wf.map((w) => workflowItem(w, r, info)).join("")}
+    </div>
+    ${wf.length ? `<div class="act" style="display:flex;gap:8px;align-items:center;margin-top:8px">
+      <input type="text" id="wf-by" placeholder="Your name" class="input small" style="min-width:150px" />
+      <span class="muted small">Switching a workflow on is recorded against your name.</span>
+    </div>` : ""}
+    <div class="muted small">Deployed ${esc(new Date(r.deployedAt).toLocaleString())} by ${esc(r.by)}${r.appUrl ? ` · app at ${esc(r.appUrl)}` : " · no public app URL yet, so the workflows call nothing"}</div></div>`);
   }
 
   parts.push(`<div class="group"><h3>${r ? "Deploy again" : "Deploy"}</h3>
@@ -1124,6 +1163,15 @@ function bindDeploy(name) {
     const out = await post(`/api/builds/${encodeURIComponent(name)}/undeploy`, { apply: false });
     Object.assign(d(), { steps: out.steps, stepsTitle: "What removing will delete", pending: "undeploy" });
   }));
+  $$("[data-wf]").forEach((b) => b.addEventListener("click", () => {
+    const by = ($("#wf-by") && $("#wf-by").value || "").trim();
+    if (!by) return toast("Add your name — switching a workflow on is recorded with it.");
+    const on = b.dataset.on !== "1";
+    go(on ? "Switching it on…" : "Switching it off…", async () => {
+      await post(`/api/builds/${encodeURIComponent(name)}/workflows/${encodeURIComponent(b.dataset.wf)}/active`, { active: on, by });
+    });
+  }));
+
   const confirm = $("#d-go");
   if (confirm) confirm.addEventListener("click", () => {
     const by = ($("#d-by").value || "").trim();

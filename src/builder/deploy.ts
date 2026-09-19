@@ -102,7 +102,16 @@ export interface DeployRecord {
   };
   n8n?: {
     credentialId: string | null;
-    workflows: Array<{ file: string; name: string; id: string; webhooks: string[]; calls: string[] }>;
+    workflows: Array<{
+      file: string; name: string; id: string; webhooks: string[]; calls: string[];
+      /** What n8n said the last time this build wrote to it — not what we asked for. */
+      active?: boolean;
+      /** Who switched it on, and when. Recorded for the same reason approval is. */
+      activatedBy?: string;
+      activatedAt?: string;
+      /** The node type that starts it, so a caller can tell a schedule from a mailbox. */
+      trigger?: string;
+    }>;
   };
 }
 
@@ -439,7 +448,7 @@ async function n8n(b: Build, api: Call, ep: Endpoint, rec: DeployRecord, steps: 
       if (r.ok) { mustOwn(b.name, (r.body as { name?: string }).name, "workflow"); current = r.body; }
     }
     const notes = [
-      "switched off",
+      was?.active ? "already on — deploying does not switch it off" : "switched off",
       `listens on ${t.webhooks.map((p) => `/webhook/${p}`).join(", ") || "a schedule"}`,
       appUrl ? `calls ${appUrl}` : "no public app URL yet, so it calls nothing",
       ...(t.stripped ? [`${t.stripped} credential(s) left to attach in n8n`] : []),
@@ -453,9 +462,81 @@ async function n8n(b: Build, api: Call, ep: Endpoint, rec: DeployRecord, steps: 
     const saved = current
       ? need(await api("PUT", `/workflows/${current.id}`, t.body), `update workflow ${current.id}`).body
       : need(await api("POST", "/workflows", t.body), "create workflow").body;
-    out.push({ file: w.file, name: t.body.name, id: (saved as { id: string }).id, webhooks: t.webhooks.map((p) => `${ep.base}/webhook/${p}`), calls: t.calls });
+    // active comes from what n8n returned, not from what was there before: a PUT is the
+    // moment the two could diverge, and the record is worth nothing if it is a guess.
+    const liveActive = Boolean((saved as { active?: boolean }).active);
+    out.push({
+      file: w.file, name: t.body.name, id: (saved as { id: string }).id,
+      webhooks: t.webhooks.map((p) => `${ep.base}/webhook/${p}`), calls: t.calls,
+      active: liveActive,
+      ...(liveActive && was?.activatedBy ? { activatedBy: was.activatedBy, activatedAt: was.activatedAt } : {}),
+      trigger: triggerOf(t.body),
+    });
   }
   if (apply) rec.n8n = { credentialId, workflows: out };
+}
+
+/** The node type that starts a workflow: a webhook, a schedule, or a mailbox. */
+function triggerOf(wf: Workflow): string | undefined {
+  const n = wf.nodes.find((x) => /trigger|webhook|cron|schedule/i.test(String(x.type ?? "")));
+  return n ? String(n.type) : undefined;
+}
+
+/**
+ * Switch one of this build's workflows on, or off again.
+ *
+ * Deliberately not part of deploy(). A created workflow sits there doing nothing, so
+ * making five at once is safe; activating one starts it answering the world, which is a
+ * decision per workflow rather than per deployment — and is recorded with a name for the
+ * same reason an approval is.
+ *
+ * Three refusals, worst consequence first:
+ *
+ *   - an id this build's record does not hold, or a live name outside the build's
+ *     namespace. This n8n account also runs the logistics system, and nothing reachable
+ *     from a build may touch SHIPMATE 01/02/05 however it is called.
+ *   - no public app URL: every HTTP node in the workflow points at nothing.
+ *   - routes the app does not serve. It would switch on and then fail on every run, which
+ *     is worse than staying off, because from the outside it looks like it is working.
+ */
+export async function setActive(
+  dir: string,
+  services: Services,
+  opts: { id: string; active: boolean; by: string; fetch?: Fetch },
+): Promise<{ id: string; name: string; active: boolean }> {
+  const ep = services.n8n;
+  if (!ep) throw new DeployError("n8n is not configured: set N8N_BASE_URL and N8N_API_KEY");
+  const by = opts.by.trim();
+  if (!by) throw new DeployError("say who is switching this — it is recorded with the workflow");
+
+  const build = basename(dir);
+  const rec = readRecord(dir);
+  const w = rec?.n8n?.workflows.find((x) => x.id === opts.id);
+  if (!rec || !w) throw new DeployError(`no workflow ${opts.id} in this build's deployment`);
+
+  if (opts.active) {
+    if (!rec.appUrl) {
+      throw new DeployError("this build has no public app URL, so the workflow would call nothing — deploy it with one first");
+    }
+    const gap = w.calls.filter((c) => !APP_ROUTES.includes(c));
+    if (gap.length) {
+      throw new DeployError(`this workflow calls routes the app does not serve (${gap.join(", ")}) — switched on it would fail on every run`);
+    }
+  }
+
+  const api = n8nClient(opts.fetch ?? fetch, ep);
+  const live = need(await api("GET", `/workflows/${w.id}`), `read workflow ${w.id}`);
+  mustOwn(build, (live.body as { name?: string }).name, "workflow");
+
+  const verb = opts.active ? "activate" : "deactivate";
+  const r = need(await api("POST", `/workflows/${w.id}/${verb}`), `${verb} workflow ${w.id}`);
+  const active = Boolean((r.body as { active?: boolean }).active ?? opts.active);
+
+  w.active = active;
+  if (active) { w.activatedBy = by; w.activatedAt = new Date().toISOString(); }
+  else { delete w.activatedBy; delete w.activatedAt; }
+  writeRecord(dir, rec);
+  return { id: w.id, name: w.name, active };
 }
 
 // --------------------------------------------------------------------------- undeploy
